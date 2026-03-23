@@ -1,0 +1,181 @@
+STEP 3 OUTPUT FILES - WHAT YOU GET AND HOW TO USE IT
+====================================================
+
+After running Step 3, you'll have three main file types in your step_3_results folder:
+
+
+1. SWEEP FILES (*_sweep.npz)
+----------------------------
+These show how match quality varies with different cost thresholds for each session pair.
+
+What's in there:
+- cost_thresholds: Array of threshold values that were tested
+- match_counts: Number of matched neurons at each threshold
+- match_rates: Proportion of neurons matched at each threshold
+- optimal_threshold: The threshold that gave the most matches
+- optimal_matches: How many neurons matched at that threshold
+- matched_ref_indices: Which neurons in session A matched (at optimal threshold)
+- matched_tgt_indices: Which neurons in session B they matched to (at optimal threshold)
+- matched_costs: The cost for each matched pair
+- ref_centroids, tgt_centroids: Neuron positions in both sessions
+
+Quick example to load and plot:
+```python
+data = np.load('animal123_session1_to_session2_sweep.npz')
+plt.plot(data['cost_thresholds'], data['match_rates'] * 100)
+plt.xlabel('Cost Threshold')
+plt.ylabel('Match Rate (%)')
+plt.title('How threshold affects match quality')
+```
+
+
+2. CONSOLIDATED TRACKING FILES ({animal_id}_consolidated_tracking.npz)
+-----------------------------------------------------------------------
+This is the big one - global neuron identities tracked across ALL sessions.
+
+What's in there:
+- neuron_tracks: Dictionary mapping global_neuron_id -> {session_idx: local_neuron_idx}
+  This is the heart of it. If neuron #42 appears in sessions 0, 2, and 4 as local neurons
+  [5, 12, 8], the track would be: {0: 5, 2: 12, 4: 8}
+  
+- sessions: List of session names in order (index matches session_idx)
+- n_sessions: Total number of sessions
+- track_lengths: How many sessions each neuron appears in
+- n_total_tracks: Total number of unique neurons identified
+- full_length_tracks: How many neurons appear in all sessions
+
+Example usage - find neurons present in all sessions:
+```python
+data = np.load('animal123_consolidated_tracking.npz', allow_pickle=True)
+
+tracks = data['neuron_tracks'].item()  # .item() to get the dict
+sessions = data['sessions']
+n_sessions = data['n_sessions']
+
+# Find full-length tracks
+persistent_neurons = [gid for gid, track in tracks.items() 
+                      if len(track) == n_sessions]
+
+print(f"Found {len(persistent_neurons)} neurons across all {n_sessions} sessions")
+```
+
+Example - get activity traces for a specific global neuron:
+```python
+# Say you have C matrices from each session loaded as session_C = {session_name: C_matrix}
+global_neuron_id = 42
+
+track = tracks[global_neuron_id]
+traces = {}
+
+for sess_idx, local_idx in track.items():
+    session_name = sessions[sess_idx]
+    traces[session_name] = session_C[session_name][:, local_idx]  # Full trace for this neuron
+
+# Now traces has the activity of global neuron #42 across all sessions it appears in
+```
+
+
+3. SUMMARY FILE (step3_summary.json)
+------------------------------------
+Just metadata - parameters used, how many animals, aggregate stats. Good for checking what 
+settings you ran, but the real data is in the NPZ files above.
+
+
+TYPICAL ANALYSIS WORKFLOWS
+===========================
+
+Track stability analysis:
+-------------------------
+See how many neurons you can track across sessions, dropout rates, etc.
+
+```python
+data = np.load('animal_consolidated_tracking.npz', allow_pickle=True)
+track_lengths = data['track_lengths']
+
+# Distribution of track persistence
+unique, counts = np.unique(track_lengths, return_counts=True)
+for length, count in zip(unique, counts):
+    print(f"{count} neurons appear in {length} sessions")
+```
+
+
+Session-to-session dropout:
+---------------------------
+Which sessions lose the most neurons?
+
+```python
+tracks = data['neuron_tracks'].item()
+sessions = data['sessions']
+
+for i in range(len(sessions)-1):
+    present_in_curr = sum(1 for track in tracks.values() if i in track)
+    present_in_next = sum(1 for track in tracks.values() if i+1 in track)
+    survived = sum(1 for track in tracks.values() if i in track and i+1 in track)
+    
+    dropout_rate = 1 - (survived / present_in_curr)
+    print(f"{sessions[i]} -> {sessions[i+1]}: {dropout_rate*100:.1f}% dropout")
+```
+
+
+Get matched pairs for any session transition:
+---------------------------------------------
+```python
+sweep_data = np.load('animal_session1_to_session2_sweep.npz')
+
+ref_indices = sweep_data['matched_ref_indices']
+tgt_indices = sweep_data['matched_tgt_indices']
+costs = sweep_data['matched_costs']
+
+# Low-cost matches are high confidence
+high_confidence = costs < 2.0
+good_matches = list(zip(ref_indices[high_confidence], 
+                       tgt_indices[high_confidence]))
+```
+
+
+Spatial drift analysis:
+----------------------
+Track how neurons move across sessions (e.g., FOV drift, tissue deformation)
+
+```python
+# Load sweep files to get centroids
+session1_data = np.load('animal_sess1_to_sess2_sweep.npz')
+session2_data = np.load('animal_sess2_to_sess3_sweep.npz')
+
+cent1 = session1_data['ref_centroids']
+cent2 = session1_data['tgt_centroids'] 
+cent3 = session2_data['tgt_centroids']
+
+# Now use consolidated tracking to find neurons in all 3
+tracking = np.load('animal_consolidated_tracking.npz', allow_pickle=True)
+tracks = tracking['neuron_tracks'].item()
+
+drifts = []
+for gid, track in tracks.items():
+    if 0 in track and 1 in track and 2 in track:
+        pos1 = cent1[track[0]]
+        pos2 = cent2[track[1]]
+        pos3 = cent3[track[2]]
+        
+        drift_12 = np.linalg.norm(pos2 - pos1)
+        drift_23 = np.linalg.norm(pos3 - pos2)
+        drifts.append([drift_12, drift_23])
+
+drifts = np.array(drifts)
+print(f"Mean drift: {drifts.mean():.2f} pixels")
+```
+
+
+NOTES AND GOTCHAS
+=================
+
+- The neuron_tracks dict uses allow_pickle=True, so remember .item() when loading
+- Session indices in tracks are 0-based and match the order in the 'sessions' array
+- Not all neurons appear in all sessions - that's the whole point of tracking
+- Cost values depend on whether you used quad voting or distance-based matching
+- Lower costs = better matches (more confident the neurons are the same)
+- Global neuron IDs are arbitrary - neuron #0 isn't special, it's just the first one found
+
+If you want to do cross-session analysis of neural activity, the consolidated tracking
+file is what you need. The sweep files are more for diagnosing matching quality and
+tuning parameters if needed.

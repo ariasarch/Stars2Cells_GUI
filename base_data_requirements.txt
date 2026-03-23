@@ -1,0 +1,192 @@
+================================================================================
+STARS2CELLS PIPELINE - INPUT FILE FORMAT SPECIFICATION
+================================================================================
+
+OVERVIEW
+--------
+The Stars2Cells pipeline requires neuron centroid data in a specific .npy
+format. Each session must be saved as a separate file with standardized naming
+and internal structure.
+
+
+FILE NAMING CONVENTION
+----------------------
+Format: {animal_id}_{session_id}.npy
+
+Requirements:
+  - Both animal_id and session_id must be numeric strings
+  - Use underscore (_) as separator
+  - File extension must be .npy
+
+Examples:
+  ✓ 408021_758519303.npy
+  ✓ 12345_67890.npy
+  ✗ mouse1_session1.npy        (non-numeric IDs)
+  ✗ 408021-758519303.npy       (wrong separator)
+
+
+FILE CONTENTS
+-------------
+Each .npy file must contain a Python dictionary saved with numpy's save
+function using allow_pickle=True.
+
+The dictionary MUST contain these 5 required keys:
+
+1. centroids_x (array/list)
+   - X-coordinates of neuron centroids in pixels
+   - Type: numpy array or list of numbers
+   - Length: N (number of neurons)
+
+2. centroids_y (array/list)
+   - Y-coordinates of neuron centroids in pixels
+   - Type: numpy array or list of numbers
+   - Length: N (must match centroids_x)
+
+3. roi_ids (array/list)
+   - Unique identifier for each neuron/ROI
+   - Type: numpy array or list (integers or strings)
+   - Length: N (must match centroids)
+   - Each ID should be unique within the session
+
+4. subject_id (string or int)
+   - Subject/animal identifier
+   - Should match the animal_id from the filename
+
+5. session_id (string or int)
+   - Session identifier
+   - Should match the session_id from the filename
+
+
+DATA REQUIREMENTS
+-----------------
+✓ Array lengths: len(centroids_x) == len(centroids_y) == len(roi_ids)
+✓ Minimum neurons: At least 4 neurons per session (sessions with <4 skipped)
+✓ Coordinate system: Pixel coordinates (typically 0,0 at top-left)
+✓ Centroid precision: Float or integer values accepted
+✓ ROI IDs: Must be unique within each session
+
+
+PYTHON CODE TO CREATE FILE
+---------------------------
+import numpy as np
+
+# Your neuron data
+centroids_x = [123.4, 456.7, 789.0, 234.1]  # X coordinates in pixels
+centroids_y = [234.5, 567.8, 890.1, 345.2]  # Y coordinates in pixels
+roi_ids = [0, 1, 2, 3]                       # Unique ID for each neuron
+
+# Create the required dictionary
+data = {
+    'centroids_x': np.array(centroids_x),
+    'centroids_y': np.array(centroids_y),
+    'roi_ids': np.array(roi_ids),
+    'subject_id': '408021',      # Animal ID (matches filename)
+    'session_id': '758519303'    # Session ID (matches filename)
+}
+
+# Save to file with proper naming
+filename = f"{data['subject_id']}_{data['session_id']}.npy"
+np.save(filename, data, allow_pickle=True)
+
+
+LOADING AND VERIFYING FILE
+---------------------------
+import numpy as np
+
+# Load the file
+data = np.load('408021_758519303.npy', allow_pickle=True).item()
+
+# Verify structure
+required_keys = ['centroids_x', 'centroids_y', 'roi_ids', 'subject_id', 'session_id']
+assert all(key in data for key in required_keys), "Missing required keys"
+
+# Verify array lengths match
+n_neurons = len(data['centroids_x'])
+assert len(data['centroids_y']) == n_neurons, "centroids_y length mismatch"
+assert len(data['roi_ids']) == n_neurons, "roi_ids length mismatch"
+assert n_neurons >= 4, f"Need at least 4 neurons, found {n_neurons}"
+
+print(f"✓ File valid: {n_neurons} neurons")
+
+
+EXAMPLE FILE STRUCTURE
+----------------------
+{
+    'centroids_x': array([123.4, 456.7, 789.0, 234.1]),
+    'centroids_y': array([234.5, 567.8, 890.1, 345.2]),
+    'roi_ids': array([0, 1, 2, 3]),
+    'subject_id': '408021',
+    'session_id': '758519303',
+    
+    # Optional: You can include additional fields (will be ignored)
+    'footprints': ...,
+    'traces': ...,
+    'timestamps': ...,
+}
+
+
+VALIDATION CHECKLIST
+--------------------
+Before running the pipeline, verify each file:
+
+□ Filename matches pattern: {animal_id}_{session_id}.npy
+□ File loads successfully: np.load(file, allow_pickle=True).item()
+□ Returns a dictionary (not array or other type)
+□ Contains all 5 required keys
+□ centroids_x, centroids_y, roi_ids all have same length
+□ At least 4 neurons present
+□ subject_id and session_id in dict match filename
+
+
+COMMON ERRORS
+-------------
+Error: "Not enough neurons (X < 4)"
+  → Session has fewer than 4 neurons and will be skipped
+
+Error: "Missing required fields"
+  → Dictionary doesn't contain all 5 required keys
+
+Error: "NO MATCH: filename.npy"
+  → Filename doesn't match {animal_id}_{session_id}.npy pattern
+
+Error: "File is not a dictionary"
+  → .npy file doesn't contain a dict (might be raw array)
+
+
+DIRECTORY STRUCTURE
+-------------------
+Place all .npy files in a single input directory:
+
+input_directory/
+├── 408021_758519303.npy
+├── 408021_758519304.npy
+├── 408021_758519305.npy
+└── 412345_758519400.npy
+
+Then run: python run_step_1_parallel.py --input-dir input_directory/
+
+
+CONVERTING FROM OTHER FORMATS
+------------------------------
+From MATLAB/Suite2P:
+  - Extract stat.mat or F.npy with ROI coordinates
+  - Convert to Python dict with required keys
+  - Save with np.save(file, data, allow_pickle=True)
+
+From CaImAn:
+  - Use cnm.estimates.coordinates to get centroids
+  - Package into required dict format
+
+From EXTRACT:
+  - Parse output.mat for centroids
+  - Convert to numpy arrays and save
+
+
+NOTES
+-----
+- The pipeline internally converts centroids to (y, x) order for processing
+- Additional metadata fields are allowed but ignored
+- ROI IDs don't need to be sequential (can be any unique values)
+- Coordinate units are pixels (no conversion applied)
+- All sessions for one animal should use consistent coordinate system
+================================================================================

@@ -1,0 +1,48 @@
+
+# --- OS / editor
+.DS_Store
+*.swp
+*.swo
+.vscode/
+.idea/
+.ipynb_checkpoints/
+
+# --- Python build/cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+.mypy_cache/
+.pytest_cache/
+
+# --- Envs & secrets
+.env
+.venv/
+.envrc
+
+# --- Logs & scratch
+*.log
+.dask-worker-space/
+tmp/
+scratch/
+outputs/
+figures/
+
+# --- Data (tweak to your layout)
+data/
+raw_data/
+results/
+**/*.avi
+**/*.mp4
+**/*.mov
+**/*.mkv
+**/*.zarr/**
+**/*.h5
+**/*.hdf5
+**/*.npy
+**/*.npz
+
+# --- Large notebooks/exports (optional)
+exports/
