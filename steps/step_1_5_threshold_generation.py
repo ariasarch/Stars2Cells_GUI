@@ -741,10 +741,20 @@ def _worker_tune_single_animal(args, log_queue=None, is_verbose=False):
     nm_logger.setLevel(logging.INFO)
     nm_logger.propagate = False
 
+    _log_dir = Path(base_cfg_dict['output_dir']) / "logs_step1_5"
+    _log_dir.mkdir(parents=True, exist_ok=True)
+    _step_log = _log_dir / f"{animal_id}_{os.getpid()}.log"
+    _fh = logging.FileHandler(_step_log)
+    _fh.setLevel(logging.DEBUG)
+    _fh.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    root.addHandler(_fh)
+    nm_logger.addHandler(_fh)
+
     def _reattach_if_needed():
         if handler not in nm_logger.handlers:
             nm_logger.handlers = []
             nm_logger.addHandler(handler)
+            nm_logger.addHandler(_fh)
             nm_logger.propagate = False
 
     result = {
@@ -887,6 +897,9 @@ def run_global_tuning_all_animals(
         verbose=verbose, animal_id=None, skip_existing=True,
     )
     base_cfg_dict = base_config.to_dict()
+    _main_log_dir = Path(output_dir) / "logs_step1_5"
+    _main_log_dir.mkdir(parents=True, exist_ok=True)
+    setup_logging(_main_log_dir, verbose=verbose)
     base_cfg_dict['calib_threshold_min']      = threshold_min
     base_cfg_dict['calib_threshold_max']      = threshold_max
     base_cfg_dict['calib_threshold_n_points'] = n_threshold_points

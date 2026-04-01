@@ -451,8 +451,14 @@ class PipelineConfigDialog(QDialog):
         ])
         
         # Step 3 parameters
-        self._add_parameter_group(params_layout, "Step 3: Final Matching", [
-            'target_match_rate', 'use_quad_voting', 'hungarian_max_cost'
+        self._add_parameter_group(params_layout, "Step 3: Neuron Matching", [
+            'use_quad_voting',
+            'use_asymmetric_dummy_costs',
+            'block_zero_vote_pairs',
+            'dist_cutoff_multiplier',
+            'postfilter_residual_multiplier',
+            'pass2_cutoff_multiplier',
+            'pass2_dummy_percentile',
         ])
         
         scroll.setWidget(params_widget)

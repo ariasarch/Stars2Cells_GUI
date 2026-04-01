@@ -317,6 +317,14 @@ def _worker_match_single_pair(args: Dict) -> Dict[str, Any]:
     root.addHandler(handler)
     root.setLevel(logging.INFO)
 
+    # Also write to a file so worker logs persist
+    _log_dir = Path(cfg_dict['output_dir']) / "logs_step2"
+    _log_dir.mkdir(parents=True, exist_ok=True)
+    _fh = logging.FileHandler(_log_dir / f"{args.get('pair_name', 'unknown')}_{os.getpid()}.log")
+    _fh.setLevel(logging.DEBUG)
+    _fh.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+    root.addHandler(_fh)
+
     try:
         ref_data    = _load_session_npz(args['ref_path'])
         target_data = _load_session_npz(args['target_path'])
@@ -401,6 +409,9 @@ def run_step_2_all_animals_parallel(
         session_pair_strategy=session_pair_strategy,
     )
     cfg_dict = base_config.to_dict()
+    _main_log_dir = Path(output_dir) / "logs_step2"
+    _main_log_dir.mkdir(parents=True, exist_ok=True)
+    setup_logging(_main_log_dir, verbose=verbose)
 
     # ── Build pair index (single glob for skip-existing) ──────────────────────
     print(f"[STEP2] Building pair index (session_pair_strategy={session_pair_strategy})...", file=sys.stderr, flush=True)

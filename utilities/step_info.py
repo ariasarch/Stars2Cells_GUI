@@ -132,16 +132,78 @@ PARAMETER_SCHEMAS = {
         'widget': 'doublespinbox', 'decimals': 1, 'nullable': True,
         'description': 'Max allowed translation (pixels). Reject transforms exceeding this. None = no limit.'
     },
-    # ========== STEP 3: FINAL MATCHING ==========
-    'target_match_rate': {'default': None, 'type': float, 'min': 0.0, 'max': 1.0, 'widget': 'doublespinbox', 'decimals': 2, 'nullable': True, 'description': 'Target match rate (None=auto)'},
-    'use_quad_voting': {'default': True, 'type': bool, 'widget': 'checkbox', 'description': 'Use quad voting'},
-    'hungarian_max_cost': {'default': None, 'type': float, 'min': 0.0, 'max': 10000.0, 'widget': 'doublespinbox', 'nullable': True, 'description': 'Max Hungarian cost'},
 
-    # ========== STEP 3 SWEEP: HUNGARIAN COST SWEEP ==========
-    'run_sweep': {'default': False, 'type': bool, 'widget': 'checkbox', 'description': 'Run Hungarian cost sweep'},
-    'hungarian_cost_min': {'default': 0.0, 'type': float, 'min': 0.0, 'max': 99.0, 'widget': 'doublespinbox', 'description': 'Min cost for sweep'},
-    'hungarian_cost_max': {'default': 100.0, 'type': float, 'min': 0.0, 'max': 100.0, 'widget': 'doublespinbox', 'description': 'Max cost for sweep'},
-    'hungarian_cost_steps': {'default': 20, 'type': int, 'min': 2, 'max': 1000, 'widget': 'spinbox', 'description': 'Number of cost steps'},
+    # ========== STEP 3: NEURON MATCHING (V3) ==========
+    'use_quad_voting': {
+        'default': True,
+        'type': bool,
+        'widget': 'checkbox',
+        'description': 'Use normalized quad voting for cost matrix (vs. pure distance fallback)'
+    },
+    'use_asymmetric_dummy_costs': {
+        'default': False,
+        'type': bool,
+        'widget': 'checkbox',
+        'description': 'Scale dummy costs per-neuron by proximity '
+                       '(closer neurons are harder to leave unmatched). '
+                       'False = uniform dummy cost for all neurons.'
+    },
+    'block_zero_vote_pairs': {
+        'default': False,
+        'type': bool,
+        'widget': 'checkbox',
+        'description': 'Hard-block neuron pairs with zero quad votes (cost=inf). '
+                       'False = zero-vote pairs within distance cutoff get a '
+                       'distance-only fallback cost.'
+    },
+    'dist_cutoff_multiplier': {
+        'default': 3.0,
+        'type': float,
+        'min': 1.0,
+        'max': 20.0,
+        'widget': 'doublespinbox',
+        'decimals': 1,
+        'description': 'Distance cutoff = this × ransac_max_residual. '
+                       'Pairs farther apart are blocked (cost=inf).'
+    },
+    'postfilter_residual_multiplier': {
+        'default': 1.0,
+        'type': float,
+        'min': 0.5,
+        'max': 10.0,
+        'widget': 'doublespinbox',
+        'decimals': 1,
+        'description': 'Post-filter cutoff = this × ransac_max_residual. '
+                       'Pass-1 matches exceeding this transformed distance are removed.'
+    },
+    'pass2_cutoff_multiplier': {
+        'default': 2.0,
+        'type': float,
+        'min': 1.0,
+        'max': 10.0,
+        'widget': 'doublespinbox',
+        'decimals': 1,
+        'description': 'Second-pass recovery cutoff = this × ransac_max_residual. '
+                       'Relaxed relative to pass-1 to recover missed neurons.'
+    },
+    'pass2_dummy_percentile': {
+        'default': 75.0,
+        'type': float,
+        'min': 10.0,
+        'max': 99.0,
+        'widget': 'doublespinbox',
+        'decimals': 0,
+        'description': 'Percentile of finite costs used as dummy cost in '
+                       'second-pass recovery. Higher = more permissive matching.'
+    },
+
+    # ========== LEGACY (kept for compatibility, ignored by V3) ==========
+    'target_match_rate': {'default': None, 'type': float, 'min': 0.0, 'max': 1.0, 'widget': 'doublespinbox', 'decimals': 2, 'nullable': True, 'description': 'Target match rate (legacy, ignored)'},
+    'hungarian_max_cost': {'default': None, 'type': float, 'min': 0.0, 'max': 10000.0, 'widget': 'doublespinbox', 'nullable': True, 'description': 'Max Hungarian cost (legacy, ignored)'},
+    'hungarian_cost_min': {'default': 0.0, 'type': float, 'min': 0.0, 'max': 99.0, 'widget': 'doublespinbox', 'description': 'Min cost for sweep (legacy, ignored)'},
+    'hungarian_cost_max': {'default': 100.0, 'type': float, 'min': 0.0, 'max': 100.0, 'widget': 'doublespinbox', 'description': 'Max cost for sweep (legacy, ignored)'},
+    'hungarian_cost_steps': {'default': 20, 'type': int, 'min': 2, 'max': 1000, 'widget': 'spinbox', 'description': 'Number of cost steps (legacy, ignored)'},
+    'run_sweep': {'default': False, 'type': bool, 'widget': 'checkbox', 'description': 'Run Hungarian cost sweep (legacy, ignored)'},
 
     # ========== IMAGE ==========
     'image_width': {'default': 640, 'type': int, 'min': 1, 'max': 10000, 'widget': 'spinbox', 'description': 'Image width (px)'},
@@ -331,8 +393,8 @@ STEP_METADATA = {
                 'ransac_max_residual',
                 'ransac_iterations',
                 'ransac_min_inlier_ratio',
-                'ransac_max_rotation_deg',      
-                'ransac_max_translation_px',   
+                'ransac_max_rotation_deg',
+                'ransac_max_translation_px',
             ]
         },
         'progress_signal': 'animal_progress',
@@ -365,10 +427,10 @@ STEP_METADATA = {
 
     3: {
         # ===== DIRECTORY & FILE INFO =====
-        'name': 'Hungarian Cost Sweep',
+        'name': 'Neuron Matching',
         'output_subdir': 'step_3_results',
         'file_pattern': '*_sweep.npz',
-        'logger_name': 'neuron_mapping_sweep',
+        'logger_name': 'neuron_mapping_consolidated',
 
         # ===== PIPELINE EXECUTION =====
         'run_module': 'step_3_neuron_matching',
@@ -378,10 +440,13 @@ STEP_METADATA = {
             'needs_sessions': False,
             'needs_callback': False,
             'extra_params': [
-                'hungarian_cost_min',
-                'hungarian_cost_max',
-                'hungarian_cost_steps',
-                'use_quad_voting'
+                'use_quad_voting',
+                'use_asymmetric_dummy_costs',
+                'block_zero_vote_pairs',
+                'dist_cutoff_multiplier',
+                'postfilter_residual_multiplier',
+                'pass2_cutoff_multiplier',
+                'pass2_dummy_percentile',
             ]
         },
         'progress_signal': 'animal_progress',
@@ -401,9 +466,9 @@ STEP_METADATA = {
         },
 
         # ===== UI DISPLAY =====
-        'label': 'Step 3: Hungarian Cost Sweep',
+        'label': 'Step 3: Neuron Matching',
         'icon': '📊',
-        'description': 'Sweep hungarian_max_cost to find optimal matching threshold',
+        'description': 'RANSAC-informed Hungarian matching with dummy padding and second-pass recovery',
         'prerequisites': [2.5],
         'enables': [],
     },

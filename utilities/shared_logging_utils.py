@@ -213,23 +213,32 @@ def setup_logging(output_dir: Path, verbose: bool = False) -> logging.Logger:
     logger = logging.getLogger('neuron_mapping')
     logger.setLevel(log_level)
     
-    # Only add handlers if none exist — if the GUI's GUIHandler is already
-    # attached, skip entirely to avoid duplicate output
-    if not logger.handlers:
+    # Always add a file handler for this step's log directory.
+    # Only add a console handler if one doesn't already exist.
+    has_console = any(
+        isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+        for h in logger.handlers
+    )
+    if not has_console:
         console_handler = logging.StreamHandler()
         console_handler.setLevel(log_level)
         console_format = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
         console_handler.setFormatter(console_format)
         logger.addHandler(console_handler)
-        
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setLevel(logging.DEBUG)
-        file_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        file_handler.setFormatter(file_format)
-        logger.addHandler(file_handler)
+
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.DEBUG)
+    file_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(file_format)
+    logger.addHandler(file_handler)
     
     logger.propagate = False
     logger.info(f"Log file: {log_file}")
     
     return logger
 
+def log_and_print(msg: str, level: str = "info"):
+    """Log via logging system AND print to stderr for subprocess visibility."""
+    import sys
+    getattr(logger, level, logger.info)(msg)
+    print(msg, file=sys.stderr, flush=True)
