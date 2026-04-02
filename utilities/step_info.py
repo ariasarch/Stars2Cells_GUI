@@ -254,7 +254,6 @@ STEP_METADATA = {
                 'quad_keep_fraction',
                 'min_pairwise_distance',
                 'min_coverage_fraction',
-                'height_percentile',
                 'session_group_regex',
                 'session_pair_strategy'
             ]

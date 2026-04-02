@@ -431,7 +431,7 @@ class PipelineConfigDialog(QDialog):
         # Step 1 parameters
         self._add_parameter_group(params_layout, "Step 1: Quad Generation", [
             'knn_k', 'diagonal_rng_seed', 'max_triangles_per_diagonal',
-            'quad_keep_fraction', 'min_pairwise_distance', 'height_percentile',
+            'quad_keep_fraction', 'min_pairwise_distance',
         ])
         
         # Step 1.5 parameters
