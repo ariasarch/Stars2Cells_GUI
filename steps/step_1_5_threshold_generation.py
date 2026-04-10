@@ -71,6 +71,41 @@ def _system_mem_report():
 
 
 # ==============================================================================
+# Session pair generation helpers
+# ==============================================================================
+
+def _generate_session_pairs(
+    sessions: List[Dict],
+    strategy: str = 'all_vs_all',
+) -> List[Tuple[int, int]]:
+    """
+    Generate (i, j) index pairs from a list of sessions based on strategy.
+
+    'all_vs_all'   — every unique pair (default, the old behavior)
+    'consecutive'  — only adjacent pairs after sorting by session name
+    """
+    if len(sessions) < 2:
+        return []
+
+    if strategy == 'consecutive':
+        # Sort by session name to get temporal order, then pair adjacents
+        sorted_indices = sorted(range(len(sessions)),
+                                key=lambda k: sessions[k].get('session_name', ''))
+        pairs = []
+        for k in range(len(sorted_indices) - 1):
+            i, j = sorted_indices[k], sorted_indices[k + 1]
+            # Ensure i < j for consistency
+            if i > j:
+                i, j = j, i
+            pairs.append((i, j))
+        return pairs
+    else:
+        # all_vs_all (original behavior)
+        return [(i, j) for i in range(len(sessions))
+                        for j in range(i + 1, len(sessions))]
+
+
+# ==============================================================================
 # Patched compute_optimal_thresholds_per_pair
 # ==============================================================================
 
@@ -109,219 +144,228 @@ def compute_optimal_thresholds_per_pair(
     example_matches = example_ref_centroids = example_tgt_centroids = None
     best_match_count = 0
 
-    n_pairs_total = len(sessions) * (len(sessions) - 1) // 2
+    # ── Use strategy from config to determine which pairs to process ──
+    strategy = getattr(config, 'session_pair_strategy', 'all_vs_all')
+    session_pairs = _generate_session_pairs(sessions, strategy)
+    n_pairs_total = len(session_pairs)
+
+    if n_pairs_total == 0:
+        return empty_result
+
+    logger.info(f"    Pair strategy '{strategy}': {n_pairs_total} pairs "
+                f"from {len(sessions)} sessions")
+
     pair_idx = 0
 
-    for i in range(len(sessions)):
-        for j in range(i + 1, len(sessions)):
-            pair_idx += 1
-            sess_i, sess_j = sessions[i], sessions[j]
+    for i, j in session_pairs:
+        pair_idx += 1
+        sess_i, sess_j = sessions[i], sessions[j]
 
-            if sess_i['n_neurons'] >= sess_j['n_neurons']:
-                ref_data, tgt_data = sess_i, sess_j
-            else:
-                ref_data, tgt_data = sess_j, sess_i
+        if sess_i['n_neurons'] >= sess_j['n_neurons']:
+            ref_data, tgt_data = sess_i, sess_j
+        else:
+            ref_data, tgt_data = sess_j, sess_i
 
-            N_avg = (ref_data['n_neurons'] + tgt_data['n_neurons']) / 2
-            pair_name = f"{ref_data['session_name']}->{tgt_data['session_name']}"
+        N_avg = (ref_data['n_neurons'] + tgt_data['n_neurons']) / 2
+        pair_name = f"{ref_data['session_name']}->{tgt_data['session_name']}"
 
-            is_first = (pair_idx == 1)
+        is_first = (pair_idx == 1)
 
-            if is_first and probe_first_pair:
-                logger.info(f"\n  📍 First-pair probe: {pair_name}")
-                logger.info(f"     ref={ref_data['n_quads']:,} quads  "
-                            f"tgt={tgt_data['n_quads']:,} quads  "
-                            f"N_avg={N_avg:.0f}")
-                print(f"     [DBG] Worker PID={os.getpid()}  "
-                      f"RSS={_mem_gb():.2f} GB  {_system_mem_report()}",
-                      file=sys.stderr, flush=True)
+        if is_first and probe_first_pair:
+            logger.info(f"\n  📍 First-pair probe: {pair_name}")
+            logger.info(f"     ref={ref_data['n_quads']:,} quads  "
+                        f"tgt={tgt_data['n_quads']:,} quads  "
+                        f"N_avg={N_avg:.0f}")
+            print(f"     [DBG] Worker PID={os.getpid()}  "
+                  f"RSS={_mem_gb():.2f} GB  {_system_mem_report()}",
+                  file=sys.stderr, flush=True)
 
-            pair_sample = _build_single_pair_sample(ref_data, tgt_data, sample_size)
-            if pair_sample is None:
-                continue
+        pair_sample = _build_single_pair_sample(ref_data, tgt_data, sample_size)
+        if pair_sample is None:
+            continue
 
-            pair_names.append(pair_name)
-            min_size = min(pair_sample['ref_desc'].shape[0],
-                           pair_sample['tgt_desc'].shape[0])
-            reference_sizes.append(min_size)
+        pair_names.append(pair_name)
+        min_size = min(pair_sample['ref_desc'].shape[0],
+                       pair_sample['tgt_desc'].shape[0])
+        reference_sizes.append(min_size)
 
-            # ── Debug: sample memory footprint ────────────────────────────
-            if is_first and probe_first_pair:
-                ref_mb = pair_sample['ref_desc'].nbytes / (1024**2)
-                tgt_mb = pair_sample['tgt_desc'].nbytes / (1024**2)
-                cent_mb = (pair_sample['ref_centroids'].nbytes +
-                           pair_sample['tgt_centroids'].nbytes) / (1024**2)
-                print(f"     [DBG] Sample arrays: ref_desc={ref_mb:.1f}MB  "
-                      f"tgt_desc={tgt_mb:.1f}MB  centroids={cent_mb:.1f}MB  "
+        # ── Debug: sample memory footprint ────────────────────────────
+        if is_first and probe_first_pair:
+            ref_mb = pair_sample['ref_desc'].nbytes / (1024**2)
+            tgt_mb = pair_sample['tgt_desc'].nbytes / (1024**2)
+            cent_mb = (pair_sample['ref_centroids'].nbytes +
+                       pair_sample['tgt_centroids'].nbytes) / (1024**2)
+            print(f"     [DBG] Sample arrays: ref_desc={ref_mb:.1f}MB  "
+                  f"tgt_desc={tgt_mb:.1f}MB  centroids={cent_mb:.1f}MB  "
+                  f"RSS={_mem_gb():.2f} GB",
+                  file=sys.stderr, flush=True)
+
+        qualities, n_matches_for_pair, n_filtered_for_pair = [], [], []
+        best_filtered_for_pair = []
+
+        t_pair_start = time.time()
+
+        # ── Plateau detection config ──────────────────────────────
+        PLATEAU_WINDOW = 10        # stop after this many unchanged
+        plateau_count  = 0
+        last_quality   = None
+        QUALITY_EPS    = 1e-6      # floating-point tolerance
+
+        for thr_idx, thr in enumerate(test_thresholds):
+            t_thr = time.time()
+
+            # ── Periodic GC to prevent stack accumulation ─────────
+            if thr_idx > 0 and thr_idx % 20 == 0:
+                gc.collect()
+
+            # ── Debug: pre-call marker (every 10th + first 5) ─────────
+            if is_first and probe_first_pair and (thr_idx < 5 or thr_idx % 10 == 0):
+                print(f"     [DBG] thr[{thr_idx+1:02d}] pre-match  thr={thr:.6f}  "
                       f"RSS={_mem_gb():.2f} GB",
                       file=sys.stderr, flush=True)
 
-            qualities, n_matches_for_pair, n_filtered_for_pair = [], [], []
-            best_filtered_for_pair = []
+            try:
+                matches = match_quads_descriptor_only(
+                    pair_sample['ref_desc'], pair_sample['ref_idx'],
+                    pair_sample['tgt_desc'], pair_sample['tgt_idx'],
+                    similarity_threshold=thr,
+                    distance_metric=config.distance_metric,
+                    top_k=1, verbose=False,
+                )
+            except Exception as match_err:
+                print(f"     [DBG] thr[{thr_idx+1:02d}] MATCH ERROR: "
+                      f"{type(match_err).__name__}: {match_err}",
+                      file=sys.stderr, flush=True)
+                import traceback
+                traceback.print_exc(file=sys.stderr)
+                sys.stderr.flush()
+                matches = []
 
-            t_pair_start = time.time()
+            n_raw = len(matches)
 
-            # ── Plateau detection config ──────────────────────────────
-            PLATEAU_WINDOW = 10        # stop after this many unchanged
-            plateau_count  = 0
-            last_quality   = None
-            QUALITY_EPS    = 1e-6      # floating-point tolerance
+            # ── Debug: post-match marker (every 10th + first 5) ───────
+            if is_first and probe_first_pair and (thr_idx < 5 or thr_idx % 10 == 0):
+                print(f"     [DBG] thr[{thr_idx+1:02d}] post-match "
+                      f"n_raw={n_raw}  RSS={_mem_gb():.2f} GB",
+                      file=sys.stderr, flush=True)
 
-            for thr_idx, thr in enumerate(test_thresholds):
-                t_thr = time.time()
-
-                # ── Periodic GC to prevent stack accumulation ─────────
-                if thr_idx > 0 and thr_idx % 20 == 0:
-                    gc.collect()
-
-                # ── Debug: pre-call marker (every 10th + first 5) ─────────
-                if is_first and probe_first_pair and (thr_idx < 5 or thr_idx % 10 == 0):
-                    print(f"     [DBG] thr[{thr_idx+1:02d}] pre-match  thr={thr:.6f}  "
-                          f"RSS={_mem_gb():.2f} GB",
-                          file=sys.stderr, flush=True)
-
+            if matches:
                 try:
-                    matches = match_quads_descriptor_only(
-                        pair_sample['ref_desc'], pair_sample['ref_idx'],
-                        pair_sample['tgt_desc'], pair_sample['tgt_idx'],
-                        similarity_threshold=thr,
-                        distance_metric=config.distance_metric,
-                        top_k=1, verbose=False,
+                    filtered = filter_quad_matches_by_consistency(
+                        matches,
+                        pair_sample['ref_centroids'],
+                        pair_sample['tgt_centroids'],
+                        consistency_threshold=config.consistency_threshold,
                     )
-                except Exception as match_err:
-                    print(f"     [DBG] thr[{thr_idx+1:02d}] MATCH ERROR: "
-                          f"{type(match_err).__name__}: {match_err}",
+                except Exception as filt_err:
+                    print(f"     [DBG] thr[{thr_idx+1:02d}] FILTER ERROR: "
+                          f"{type(filt_err).__name__}: {filt_err}",
                           file=sys.stderr, flush=True)
                     import traceback
                     traceback.print_exc(file=sys.stderr)
                     sys.stderr.flush()
-                    matches = []
+                    filtered = []
+                n_filt = len(filtered)
+                quality = compute_match_quality(n_raw, n_filt, min_size)
+                if len(filtered) > len(best_filtered_for_pair):
+                    best_filtered_for_pair = filtered
+            else:
+                n_filt, quality = 0, 0.0
 
-                n_raw = len(matches)
-
-                # ── Debug: post-match marker (every 10th + first 5) ───────
-                if is_first and probe_first_pair and (thr_idx < 5 or thr_idx % 10 == 0):
-                    print(f"     [DBG] thr[{thr_idx+1:02d}] post-match "
-                          f"n_raw={n_raw}  RSS={_mem_gb():.2f} GB",
-                          file=sys.stderr, flush=True)
-
-                if matches:
-                    try:
-                        filtered = filter_quad_matches_by_consistency(
-                            matches,
-                            pair_sample['ref_centroids'],
-                            pair_sample['tgt_centroids'],
-                            consistency_threshold=config.consistency_threshold,
-                        )
-                    except Exception as filt_err:
-                        print(f"     [DBG] thr[{thr_idx+1:02d}] FILTER ERROR: "
-                              f"{type(filt_err).__name__}: {filt_err}",
-                              file=sys.stderr, flush=True)
-                        import traceback
-                        traceback.print_exc(file=sys.stderr)
-                        sys.stderr.flush()
-                        filtered = []
-                    n_filt = len(filtered)
-                    quality = compute_match_quality(n_raw, n_filt, min_size)
-                    if len(filtered) > len(best_filtered_for_pair):
-                        best_filtered_for_pair = filtered
-                else:
-                    n_filt, quality = 0, 0.0
-
-                qualities.append(quality)
-                n_matches_for_pair.append(n_raw)
-                n_filtered_for_pair.append(n_filt)
-
-                if is_first and probe_first_pair:
-                    elapsed_thr = time.time() - t_thr
-                    logger.info(
-                        f"     thr[{thr_idx+1:02d}/{len(test_thresholds)}]"
-                        f"  thr={thr:.4f}"
-                        f"  raw={n_raw:4d}  filt={n_filt:4d}"
-                        f"  quality={quality:.4f}"
-                        f"  ({elapsed_thr:.2f}s)"
-                    )
-
-                # ── Plateau early exit ────────────────────────────────
-                if last_quality is not None and abs(quality - last_quality) < QUALITY_EPS:
-                    plateau_count += 1
-                else:
-                    plateau_count = 0
-                last_quality = quality
-
-                if plateau_count >= PLATEAU_WINDOW and thr_idx >= 15:
-                    # Fill remaining thresholds with last known values
-                    remaining = len(test_thresholds) - thr_idx - 1
-                    if remaining > 0:
-                        qualities.extend([quality] * remaining)
-                        n_matches_for_pair.extend([n_raw] * remaining)
-                        n_filtered_for_pair.extend([n_filt] * remaining)
-                    if is_first and probe_first_pair:
-                        logger.info(
-                            f"     ✂ Plateau detected at thr[{thr_idx+1}] "
-                            f"(quality={quality:.4f} unchanged for "
-                            f"{PLATEAU_WINDOW} steps). Skipping {remaining} "
-                            f"remaining thresholds."
-                        )
-                    break
-                # ── End plateau check ─────────────────────────────────
-
-            # ── Debug: pair completed ─────────────────────────────────────
-            if is_first and probe_first_pair:
-                print(f"     [DBG] First pair threshold loop COMPLETED "
-                      f"({len(test_thresholds)} thresholds)  "
-                      f"RSS={_mem_gb():.2f} GB  {_system_mem_report()}",
-                      file=sys.stderr, flush=True)
-
-            pair_time = time.time() - t_pair_start
+            qualities.append(quality)
+            n_matches_for_pair.append(n_raw)
+            n_filtered_for_pair.append(n_filt)
 
             if is_first and probe_first_pair:
-                tau_probe = find_threshold_for_quality_target(
-                    test_thresholds, np.array(qualities), target_quality
+                elapsed_thr = time.time() - t_thr
+                logger.info(
+                    f"     thr[{thr_idx+1:02d}/{len(test_thresholds)}]"
+                    f"  thr={thr:.4f}"
+                    f"  raw={n_raw:4d}  filt={n_filt:4d}"
+                    f"  quality={quality:.4f}"
+                    f"  ({elapsed_thr:.2f}s)"
                 )
-                est_total = pair_time * n_pairs_total
-                logger.info(f"\n     ✓ First pair done in {pair_time:.1f}s")
-                logger.info(f"       optimal tau = {tau_probe:.4f}")
-                logger.info(f"       Est. total for {n_pairs_total} pairs: "
-                            f"~{est_total:.0f}s ({est_total/60:.1f} min)")
 
-            all_qualities.append(qualities)
-            all_n_matches.append(n_matches_for_pair)
-            all_n_filtered.append(n_filtered_for_pair)
+            # ── Plateau early exit ────────────────────────────────
+            if last_quality is not None and abs(quality - last_quality) < QUALITY_EPS:
+                plateau_count += 1
+            else:
+                plateau_count = 0
+            last_quality = quality
 
-            tau = find_threshold_for_quality_target(
+            if plateau_count >= PLATEAU_WINDOW and thr_idx >= 15:
+                # Fill remaining thresholds with last known values
+                remaining = len(test_thresholds) - thr_idx - 1
+                if remaining > 0:
+                    qualities.extend([quality] * remaining)
+                    n_matches_for_pair.extend([n_raw] * remaining)
+                    n_filtered_for_pair.extend([n_filt] * remaining)
+                if is_first and probe_first_pair:
+                    logger.info(
+                        f"     ✂ Plateau detected at thr[{thr_idx+1}] "
+                        f"(quality={quality:.4f} unchanged for "
+                        f"{PLATEAU_WINDOW} steps). Skipping {remaining} "
+                        f"remaining thresholds."
+                    )
+                break
+            # ── End plateau check ─────────────────────────────────
+
+        # ── Debug: pair completed ─────────────────────────────────────
+        if is_first and probe_first_pair:
+            print(f"     [DBG] First pair threshold loop COMPLETED "
+                  f"({len(test_thresholds)} thresholds)  "
+                  f"RSS={_mem_gb():.2f} GB  {_system_mem_report()}",
+                  file=sys.stderr, flush=True)
+
+        pair_time = time.time() - t_pair_start
+
+        if is_first and probe_first_pair:
+            tau_probe = find_threshold_for_quality_target(
                 test_thresholds, np.array(qualities), target_quality
             )
-            N_values.append(N_avg)
-            tau_values.append(tau)
+            est_total = pair_time * n_pairs_total
+            logger.info(f"\n     ✓ First pair done in {pair_time:.1f}s")
+            logger.info(f"       optimal tau = {tau_probe:.4f}")
+            logger.info(f"       Est. total for {n_pairs_total} pairs: "
+                        f"~{est_total:.0f}s ({est_total/60:.1f} min)")
 
-            if len(best_filtered_for_pair) > best_match_count:
-                best_match_count = len(best_filtered_for_pair)
-                example_matches = _convert_matches_to_array(best_filtered_for_pair[:50])
-                example_ref_centroids = pair_sample['ref_centroids']
-                example_tgt_centroids = pair_sample['tgt_centroids']
+        all_qualities.append(qualities)
+        all_n_matches.append(n_matches_for_pair)
+        all_n_filtered.append(n_filtered_for_pair)
 
-            if verbose:
-                opt_idx = np.argmin(np.abs(test_thresholds - tau))
-                n_at_opt = n_filtered_for_pair[opt_idx]
-                rate_at_opt = n_at_opt / min_size if min_size > 0 else 0
-                logger.info(
-                    f"  [{pair_idx}/{n_pairs_total}] {pair_name}: "
-                    f"N={N_avg:.0f}  tau={tau:.4f}  "
-                    f"matches={n_at_opt}/{min_size} ({rate_at_opt:.1%})  "
-                    f"({pair_time:.1f}s)"
-                )
+        tau = find_threshold_for_quality_target(
+            test_thresholds, np.array(qualities), target_quality
+        )
+        N_values.append(N_avg)
+        tau_values.append(tau)
 
-            # ── Debug: periodic memory report every 10 pairs ──────────────
-            if pair_idx % 10 == 0:
-                print(f"     [DBG] Pair {pair_idx}/{n_pairs_total}  "
-                      f"RSS={_mem_gb():.2f} GB  "
-                      f"best_matches={best_match_count}  "
-                      f"{_system_mem_report()}",
-                      file=sys.stderr, flush=True)
+        if len(best_filtered_for_pair) > best_match_count:
+            best_match_count = len(best_filtered_for_pair)
+            example_matches = _convert_matches_to_array(best_filtered_for_pair[:50])
+            example_ref_centroids = pair_sample['ref_centroids']
+            example_tgt_centroids = pair_sample['tgt_centroids']
 
-            if pair_callback is not None:
-                pair_callback(pair_idx, n_pairs_total, pair_time, pair_name)
+        if verbose:
+            opt_idx = np.argmin(np.abs(test_thresholds - tau))
+            n_at_opt = n_filtered_for_pair[opt_idx]
+            rate_at_opt = n_at_opt / min_size if min_size > 0 else 0
+            logger.info(
+                f"  [{pair_idx}/{n_pairs_total}] {pair_name}: "
+                f"N={N_avg:.0f}  tau={tau:.4f}  "
+                f"matches={n_at_opt}/{min_size} ({rate_at_opt:.1%})  "
+                f"({pair_time:.1f}s)"
+            )
+
+        # ── Debug: periodic memory report every 10 pairs ──────────────
+        if pair_idx % 10 == 0:
+            print(f"     [DBG] Pair {pair_idx}/{n_pairs_total}  "
+                  f"RSS={_mem_gb():.2f} GB  "
+                  f"best_matches={best_match_count}  "
+                  f"{_system_mem_report()}",
+                  file=sys.stderr, flush=True)
+
+        if pair_callback is not None:
+            pair_callback(pair_idx, n_pairs_total, pair_time, pair_name)
 
     return {
         'N_values': N_values,
@@ -524,8 +568,11 @@ def auto_tune_threshold_with_scaling(
     for gk, grp in session_groups.items():
         if len(grp) < 2:
             continue
-        n_pairs_in_group = len(grp) * (len(grp) - 1) // 2
-        logger.info(f"  Group '{gk}': {len(grp)} sessions -> {n_pairs_in_group} pairs")
+        # Count pairs using the actual strategy
+        strategy = getattr(config, 'session_pair_strategy', 'all_vs_all')
+        n_pairs_in_group = len(_generate_session_pairs(grp, strategy))
+        logger.info(f"  Group '{gk}': {len(grp)} sessions -> {n_pairs_in_group} pairs "
+                    f"(strategy={strategy})")
 
         pr = compute_optimal_thresholds_per_pair(
             grp, config, sample_size,
@@ -916,6 +963,7 @@ def run_global_tuning_all_animals(
     logger.info(f"Discovered {len(animal_ids)} animals: {animal_ids}")
     logger.info(f"Threshold sweep: {threshold_min:.3f} to {threshold_max:.3f} ({n_threshold_points} points)")
     logger.info(f"sample_size={sample_size}  max_pairs_per_animal={max_pairs_per_animal}")
+    logger.info(f"session_pair_strategy={session_pair_strategy}")
 
     logger.info(f"Scanning sessions in main process...")
     all_sessions_by_animal = {}
