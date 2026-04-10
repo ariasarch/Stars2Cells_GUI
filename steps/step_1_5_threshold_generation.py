@@ -936,7 +936,7 @@ def run_global_tuning_all_animals(
         logger.info(f"  Animal {aid}: {len(clean_sessions)} sessions, ~{n_pairs_est} pairs "
                     f"(will cap at {max_pairs_per_animal})")
 
-    use_bins = kwargs.get('use_neuron_count_bins', True)
+    use_bins = kwargs.get('use_neuron_count_bins', False)
     bin_edges = kwargs.get('neuron_count_bin_edges', None)
 
     if use_bins and len(animal_ids) > 1:
