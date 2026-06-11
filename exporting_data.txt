@@ -1,181 +1,278 @@
 STEP 3 OUTPUT FILES - WHAT YOU GET AND HOW TO USE IT
 ====================================================
 
-After running Step 3, you'll have three main file types in your step_3_results folder:
+After running Step 3 (V3.1), you'll have three main file types in your
+step_3_results folder. Important: V3.1 no longer performs an actual cost
+sweep — the legacy "sweep" naming and the hungarian_cost_* parameters are
+kept for backward compatibility but ignored. Matching is a single padded
+Hungarian solve plus post-filter and a second-pass recovery, with per-match
+confidence scoring.
 
 
 1. SWEEP FILES (*_sweep.npz)
 ----------------------------
-These show how match quality varies with different cost thresholds for each session pair.
+One file per session pair. These hold the matched-neuron results plus
+metadata. Saved with allow_pickle=False — load with allow_pickle=False.
 
-What's in there:
-- cost_thresholds: Array of threshold values that were tested
-- match_counts: Number of matched neurons at each threshold
-- match_rates: Proportion of neurons matched at each threshold
-- optimal_threshold: The threshold that gave the most matches
-- optimal_matches: How many neurons matched at that threshold
-- matched_ref_indices: Which neurons in session A matched (at optimal threshold)
-- matched_tgt_indices: Which neurons in session B they matched to (at optimal threshold)
-- matched_costs: The cost for each matched pair
-- ref_centroids, tgt_centroids: Neuron positions in both sessions
+Identification fields:
+- animal_id          (str)
+- pair_name          (str)  e.g. "animalA_sess1_to_sess2"
+- ref_session        (str)
+- target_session     (str)
 
-Quick example to load and plot:
+Centroid arrays:
+- ref_centroids      (N_ref, 2)  neuron positions in session A
+- tgt_centroids      (N_tgt, 2)  neuron positions in session B
+- n_ref_neurons      (int)
+- n_target_neurons   (int)
+- n_inlier_quads     (int)       # of RANSAC-inlier quads from step 2.5
+
+Match results (the actual data you want):
+- matched_ref_indices  (M,) int32  indices into ref_centroids
+- matched_tgt_indices  (M,) int32  indices into tgt_centroids
+- matched_costs        (M,) float32  combined Hungarian cost for each pair
+- match_confidence     (M,) float32  [0, 1] confidence score (see below)
+- match_pass           (M,) int32   1 = pass-1 match, 2 = pass-2 recovery
+
+Legacy / vestigial fields (kept for back-compat, NOT informative in V3.1):
+- cost_thresholds   array of threshold values from the legacy sweep config
+- match_counts      CONSTANT array — every entry equals the final match count
+- match_rates       CONSTANT array — every entry equals match_count / n_ref
+- optimal_threshold hardcoded to 0.0
+- optimal_matches   == final match count
+- optimal_rate      == final match rate
+
+Don't plot match_rates vs cost_thresholds — you'll get a flat line.
+
+
+How match_confidence is computed:
+  Equally-weighted average of four [0, 1] signals per pair:
+    vote_score    degree-normalized quad votes / field max
+    dist_score    1 - transformed_distance / dist_cutoff
+    margin_score  (2nd_best_cost - best_cost) / 2nd_best_cost
+    pass_score    1.0 for pass-1, 0.5 for pass-2 recovery
+  Higher = more confident. Use this instead of raw cost when filtering.
+
+
+Quick example — load and inspect a pair:
 ```python
-data = np.load('animal123_session1_to_session2_sweep.npz')
-plt.plot(data['cost_thresholds'], data['match_rates'] * 100)
-plt.xlabel('Cost Threshold')
-plt.ylabel('Match Rate (%)')
-plt.title('How threshold affects match quality')
+import numpy as np
+
+data = np.load('animalA_sess1_to_sess2_sweep.npz', allow_pickle=False)
+
+ref_idx  = data['matched_ref_indices']
+tgt_idx  = data['matched_tgt_indices']
+costs    = data['matched_costs']
+conf     = data['match_confidence']
+pass_id  = data['match_pass']
+
+print(f"{len(ref_idx)} matches "
+      f"({(pass_id == 1).sum()} pass-1, {(pass_id == 2).sum()} pass-2)")
+print(f"Mean confidence: {conf.mean():.3f}")
+```
+
+
+High-confidence subset (the right way in V3.1):
+```python
+high_conf_mask = data['match_confidence'] >= 0.5     # tune to taste
+good_ref = data['matched_ref_indices'][high_conf_mask]
+good_tgt = data['matched_tgt_indices'][high_conf_mask]
+```
+
+
+Plot confidence distribution:
+```python
+import matplotlib.pyplot as plt
+plt.hist(data['match_confidence'], bins=30)
+plt.xlabel('match_confidence'); plt.ylabel('count')
 ```
 
 
 2. CONSOLIDATED TRACKING FILES ({animal_id}_consolidated_tracking.npz)
 -----------------------------------------------------------------------
-This is the big one - global neuron identities tracked across ALL sessions.
+Global neuron identities tracked across ALL sessions for one animal.
+neuron_tracks is a Python dict, so load with allow_pickle=True and use .item().
 
-What's in there:
-- neuron_tracks: Dictionary mapping global_neuron_id -> {session_idx: local_neuron_idx}
-  This is the heart of it. If neuron #42 appears in sessions 0, 2, and 4 as local neurons
-  [5, 12, 8], the track would be: {0: 5, 2: 12, 4: 8}
-  
-- sessions: List of session names in order (index matches session_idx)
-- n_sessions: Total number of sessions
-- track_lengths: How many sessions each neuron appears in
-- n_total_tracks: Total number of unique neurons identified
-- full_length_tracks: How many neurons appear in all sessions
+Identification:
+- animal_id          (str)
+- sessions           (n_sessions,) object  session names in canonical order
+- n_sessions         (int)
 
-Example usage - find neurons present in all sessions:
+Tracks:
+- neuron_tracks      dict[int, dict[int, int]]
+                     global_id -> {session_idx: local_neuron_idx}
+                     If neuron #42 appears in sessions 0, 2, 4 as locals
+                     [5, 12, 8], the track is {0: 5, 2: 12, 4: 8}.
+
+- track_lengths           (n_total_tracks,) int32
+                          number of sessions each global neuron appears in
+- track_confidence        (n_total_tracks,) float32
+                          MINIMUM link confidence across the track's chain
+                          (weakest-link reliability — recommended for filtering)
+- track_mean_confidence   (n_total_tracks,) float32
+                          MEAN link confidence across the track
+                          (1.0 for singletons with no links)
+
+Aggregate stats:
+- n_total_tracks      (int)  total unique global neurons
+- full_length_tracks  (int)  number that appear in every session
+- avg_track_length    (float)
+- max_track_length    (int)
+
+Note: the order of track_lengths / track_confidence / track_mean_confidence
+matches sorted(neuron_tracks.keys()), NOT insertion order.
+
+
+Find neurons present in every session, filtered by confidence:
 ```python
-data = np.load('animal123_consolidated_tracking.npz', allow_pickle=True)
+import numpy as np
 
-tracks = data['neuron_tracks'].item()  # .item() to get the dict
-sessions = data['sessions']
-n_sessions = data['n_sessions']
+data = np.load('animalA_consolidated_tracking.npz', allow_pickle=True)
+tracks     = data['neuron_tracks'].item()
+sessions   = data['sessions']
+n_sessions = int(data['n_sessions'])
 
-# Find full-length tracks
-persistent_neurons = [gid for gid, track in tracks.items() 
-                      if len(track) == n_sessions]
+track_ids  = sorted(tracks.keys())
+track_min_conf = data['track_confidence']     # aligned to sorted track_ids
 
-print(f"Found {len(persistent_neurons)} neurons across all {n_sessions} sessions")
+persistent = [
+    gid for gid, min_conf in zip(track_ids, track_min_conf)
+    if len(tracks[gid]) == n_sessions and min_conf >= 0.5
+]
+print(f"{len(persistent)} high-confidence full-length tracks "
+      f"(of {len(tracks)} total)")
 ```
 
-Example - get activity traces for a specific global neuron:
+
+Get activity traces for one global neuron across all its sessions:
 ```python
-# Say you have C matrices from each session loaded as session_C = {session_name: C_matrix}
-global_neuron_id = 42
+# Assume session_C = {session_name: C_matrix of shape (T, n_neurons)}
+gid = 42
+track = tracks[gid]
 
-track = tracks[global_neuron_id]
-traces = {}
-
-for sess_idx, local_idx in track.items():
-    session_name = sessions[sess_idx]
-    traces[session_name] = session_C[session_name][:, local_idx]  # Full trace for this neuron
-
-# Now traces has the activity of global neuron #42 across all sessions it appears in
+traces = {
+    sessions[sess_idx]: session_C[sessions[sess_idx]][:, local_idx]
+    for sess_idx, local_idx in track.items()
+}
 ```
 
 
 3. SUMMARY FILE (step3_summary.json)
 ------------------------------------
-Just metadata - parameters used, how many animals, aggregate stats. Good for checking what 
-settings you ran, but the real data is in the NPZ files above.
+Per-run metadata: parameters used and per-animal aggregate stats.
+
+Top-level keys:
+- use_quad_voting, use_asymmetric_dummy_costs, block_zero_vote_pairs
+- dist_cutoff_multiplier, postfilter_residual_multiplier
+- pass2_cutoff_multiplier, pass2_dummy_percentile
+- n_animals
+- animals  list of per-animal dicts, each with:
+    animal_id, n_pairs, pair_results (list of per-pair summaries),
+    avg_optimal_rate, total_optimal_matches,
+    n_total_tracks, full_length_tracks,
+    avg_track_length, max_track_length
+
+Good for verifying parameters and getting a quick health check; the actual
+neuron data lives in the NPZ files.
 
 
 TYPICAL ANALYSIS WORKFLOWS
-===========================
+==========================
 
-Track stability analysis:
--------------------------
-See how many neurons you can track across sessions, dropout rates, etc.
-
+Track-length distribution:
+--------------------------
 ```python
-data = np.load('animal_consolidated_tracking.npz', allow_pickle=True)
+data = np.load('animalA_consolidated_tracking.npz', allow_pickle=True)
 track_lengths = data['track_lengths']
-
-# Distribution of track persistence
 unique, counts = np.unique(track_lengths, return_counts=True)
 for length, count in zip(unique, counts):
-    print(f"{count} neurons appear in {length} sessions")
+    print(f"{count} neurons appear in {length} session(s)")
 ```
 
 
-Session-to-session dropout:
----------------------------
-Which sessions lose the most neurons?
-
+Session-to-session retention:
+-----------------------------
 ```python
-tracks = data['neuron_tracks'].item()
+tracks   = data['neuron_tracks'].item()
 sessions = data['sessions']
 
-for i in range(len(sessions)-1):
-    present_in_curr = sum(1 for track in tracks.values() if i in track)
-    present_in_next = sum(1 for track in tracks.values() if i+1 in track)
-    survived = sum(1 for track in tracks.values() if i in track and i+1 in track)
-    
-    dropout_rate = 1 - (survived / present_in_curr)
-    print(f"{sessions[i]} -> {sessions[i+1]}: {dropout_rate*100:.1f}% dropout")
+for i in range(len(sessions) - 1):
+    in_curr  = sum(1 for t in tracks.values() if i in t)
+    survived = sum(1 for t in tracks.values() if i in t and i + 1 in t)
+    dropout  = 1 - (survived / in_curr) if in_curr else 0.0
+    print(f"{sessions[i]} -> {sessions[i+1]}: "
+          f"{dropout * 100:.1f}% dropout ({survived}/{in_curr} retained)")
 ```
 
 
-Get matched pairs for any session transition:
----------------------------------------------
+High-confidence pairs for any session transition:
+-------------------------------------------------
 ```python
-sweep_data = np.load('animal_session1_to_session2_sweep.npz')
+sweep = np.load('animalA_sess1_to_sess2_sweep.npz', allow_pickle=False)
 
-ref_indices = sweep_data['matched_ref_indices']
-tgt_indices = sweep_data['matched_tgt_indices']
-costs = sweep_data['matched_costs']
+# Confidence-based threshold (preferred in V3.1)
+mask = sweep['match_confidence'] >= 0.6
+ref_idx  = sweep['matched_ref_indices'][mask]
+tgt_idx  = sweep['matched_tgt_indices'][mask]
 
-# Low-cost matches are high confidence
-high_confidence = costs < 2.0
-good_matches = list(zip(ref_indices[high_confidence], 
-                       tgt_indices[high_confidence]))
+# Optionally restrict to pass-1 matches only (most reliable)
+pass1 = sweep['match_pass'] == 1
+mask  = mask & pass1
 ```
 
 
-Spatial drift analysis:
-----------------------
-Track how neurons move across sessions (e.g., FOV drift, tissue deformation)
-
+Spatial drift across three sessions:
+------------------------------------
 ```python
-# Load sweep files to get centroids
-session1_data = np.load('animal_sess1_to_sess2_sweep.npz')
-session2_data = np.load('animal_sess2_to_sess3_sweep.npz')
+s12 = np.load('animalA_sess1_to_sess2_sweep.npz', allow_pickle=False)
+s23 = np.load('animalA_sess2_to_sess3_sweep.npz', allow_pickle=False)
 
-cent1 = session1_data['ref_centroids']
-cent2 = session1_data['tgt_centroids'] 
-cent3 = session2_data['tgt_centroids']
+cent1 = s12['ref_centroids']
+cent2 = s12['tgt_centroids']      # same neurons indexed in session 2
+cent3 = s23['tgt_centroids']
 
-# Now use consolidated tracking to find neurons in all 3
-tracking = np.load('animal_consolidated_tracking.npz', allow_pickle=True)
-tracks = tracking['neuron_tracks'].item()
+trk = np.load('animalA_consolidated_tracking.npz', allow_pickle=True)
+tracks = trk['neuron_tracks'].item()
 
 drifts = []
-for gid, track in tracks.items():
-    if 0 in track and 1 in track and 2 in track:
-        pos1 = cent1[track[0]]
-        pos2 = cent2[track[1]]
-        pos3 = cent3[track[2]]
-        
-        drift_12 = np.linalg.norm(pos2 - pos1)
-        drift_23 = np.linalg.norm(pos3 - pos2)
-        drifts.append([drift_12, drift_23])
+for gid, t in tracks.items():
+    if {0, 1, 2}.issubset(t):
+        p1 = cent1[t[0]]; p2 = cent2[t[1]]; p3 = cent3[t[2]]
+        drifts.append([np.linalg.norm(p2 - p1),
+                       np.linalg.norm(p3 - p2)])
 
 drifts = np.array(drifts)
-print(f"Mean drift: {drifts.mean():.2f} pixels")
+print(f"n={len(drifts)}, mean drift {drifts.mean(0)} px")
 ```
 
 
 NOTES AND GOTCHAS
 =================
 
-- The neuron_tracks dict uses allow_pickle=True, so remember .item() when loading
-- Session indices in tracks are 0-based and match the order in the 'sessions' array
-- Not all neurons appear in all sessions - that's the whole point of tracking
-- Cost values depend on whether you used quad voting or distance-based matching
-- Lower costs = better matches (more confident the neurons are the same)
-- Global neuron IDs are arbitrary - neuron #0 isn't special, it's just the first one found
+- Sweep files: load with allow_pickle=False (no pickled objects inside).
+- Consolidated tracking files: load with allow_pickle=True; neuron_tracks
+  is a dict and needs .item() after indexing.
+- Session indices in tracks are 0-based, aligned to the 'sessions' array
+  order (which is sorted alphabetically — verify this matches your
+  experimental order if you need chronology).
+- Not every neuron appears in every session — that's the whole point.
+- Lower cost = better match; higher confidence = better match. Prefer
+  match_confidence over raw cost for thresholding.
+- match_pass tells you whether a match came from pass-1 (full Hungarian)
+  or pass-2 (recovery on unmatched residuals). Pass-2 matches are scored
+  with pass_score = 0.5, which lowers their match_confidence relative to
+  pass-1 — that's intentional.
+- track_confidence is the WEAKEST link in the chain. Use it as a
+  conservative reliability estimate. Use track_mean_confidence if you
+  prefer an average-quality view.
+- For singleton tracks (length 1), there are no links, so
+  track_confidence and track_mean_confidence default to 1.0. Filter on
+  track_lengths >= 2 first if that bothers you.
+- Global neuron IDs are arbitrary integers, not sorted by any property.
+- The legacy sweep parameters (hungarian_cost_min/max/steps,
+  hungarian_max_cost, target_match_rate) are accepted by
+  run_step_3_final_matching for back-compat but have no effect.
 
-If you want to do cross-session analysis of neural activity, the consolidated tracking
-file is what you need. The sweep files are more for diagnosing matching quality and
-tuning parameters if needed.
+For cross-session analysis of neural activity, use the consolidated
+tracking file. For diagnosing match quality of a single pair, use the
+sweep file's match_confidence and match_pass arrays.

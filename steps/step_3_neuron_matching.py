@@ -602,6 +602,33 @@ def consolidate_neuron_tracks(
 # Animal Processing
 # ==============================================================================
 
+def _load_sweep_result(sweep_file: Path) -> Optional[Dict[str, Any]]:
+    """Reconstruct a process_session_pair_sweep result dict from a saved
+    *_sweep.npz, so skip_existing can reuse a pair without recomputing it while
+    still feeding track consolidation. Mirrors the live return dict's keys."""
+    try:
+        d = np.load(sweep_file, allow_pickle=False)
+    except Exception:
+        return None
+    return {
+        'animal_id': decode_string_field(d.get('animal_id', '')),
+        'pair_name': decode_string_field(d.get('pair_name', '')),
+        'ref_session': decode_string_field(d.get('ref_session', '')),
+        'target_session': decode_string_field(d.get('target_session', '')),
+        'n_ref_neurons': int(d['n_ref_neurons']),
+        'n_target_neurons': int(d['n_target_neurons']),
+        'n_inlier_quads': int(d['n_inlier_quads']),
+        'optimal_threshold': float(d['optimal_threshold']),
+        'optimal_matches': int(d['optimal_matches']),
+        'optimal_rate': float(d['optimal_rate']),
+        'matched_ref_indices': d['matched_ref_indices'],
+        'matched_tgt_indices': d['matched_tgt_indices'],
+        'matched_costs': d['matched_costs'],
+        'match_confidence': d['match_confidence'],
+        'match_pass': d['match_pass'],
+    }
+
+
 def process_animal_complete(
     animal_id: str,
     step2_5_dir: Path,
@@ -614,6 +641,7 @@ def process_animal_complete(
     postfilter_residual_multiplier: float = 1.0,
     pass2_cutoff_multiplier: float = 2.0,
     pass2_dummy_percentile: float = 75.0,
+    skip_existing: bool = True,
 ) -> Dict[str, Any]:
     print(f"\n{'#'*100}")
     print(f"# ANIMAL: {animal_id}")
@@ -633,7 +661,20 @@ def process_animal_complete(
     print(f"Found {len(filter_files)} session pairs")
 
     sweep_results = []
+    n_reused = 0
     for filter_file in filter_files:
+        pair_name = filter_file.stem.replace('_filtered_matches', '')
+        sweep_file = output_dir / f"{pair_name}_sweep.npz"
+
+        # Honor skip_existing: reuse a saved sweep instead of recomputing it.
+        # Reload (don't drop) so track consolidation still sees every pair.
+        if skip_existing and sweep_file.exists():
+            reused = _load_sweep_result(sweep_file)
+            if reused is not None:
+                n_reused += 1
+                sweep_results.append(reused)
+                continue
+
         result = process_session_pair_sweep(
             filter_file, output_dir, use_quad_voting, hungarian_cost_values,
             use_asymmetric_dummy_costs=use_asymmetric_dummy_costs,
@@ -645,6 +686,9 @@ def process_animal_complete(
         )
         if result:
             sweep_results.append(result)
+
+    if n_reused:
+        logger.info(f"  skip_existing: reused {n_reused} existing sweep(s) for {animal_id}")
 
     if not sweep_results:
         return {'animal_id': animal_id, 'n_pairs': 0, 'error': 'No valid results'}
@@ -700,7 +744,7 @@ def worker_process_animal_complete(args: Tuple) -> Dict[str, Any]:
     (animal_id, step2_5_dir_str, output_dir_str, use_quad_voting,
      hungarian_cost_values, use_asymmetric_dummy_costs, block_zero_vote_pairs,
      dist_cutoff_multiplier, postfilter_residual_multiplier,
-     pass2_cutoff_multiplier, pass2_dummy_percentile) = args
+     pass2_cutoff_multiplier, pass2_dummy_percentile, skip_existing) = args
 
     step2_5_dir = Path(step2_5_dir_str)
     output_dir = Path(output_dir_str)
@@ -718,6 +762,7 @@ def worker_process_animal_complete(args: Tuple) -> Dict[str, Any]:
         postfilter_residual_multiplier=postfilter_residual_multiplier,
         pass2_cutoff_multiplier=pass2_cutoff_multiplier,
         pass2_dummy_percentile=pass2_dummy_percentile,
+        skip_existing=skip_existing,
     )
     log_worker_finish("Step 3 Complete", animal_id, result)
     return result
@@ -739,6 +784,8 @@ def run_step_3_final_matching(
     pass2_dummy_percentile: float = 75.0,
     processes: Optional[int] = None,
     verbose: bool = True,
+    skip_existing: bool = False,   # default off so direct callers still recompute;
+                                   # the GUI forwards config.skip_existing explicitly
     # Legacy (accepted, ignored)
     hungarian_cost_min: float = 0.0,
     hungarian_cost_max: float = 2319.0,
@@ -778,7 +825,7 @@ def run_step_3_final_matching(
         (aid, str(step2_5_dir), str(step3_dir), use_quad_voting,
          hungarian_cost_values, use_asymmetric_dummy_costs, block_zero_vote_pairs,
          dist_cutoff_multiplier, postfilter_residual_multiplier,
-         pass2_cutoff_multiplier, pass2_dummy_percentile)
+         pass2_cutoff_multiplier, pass2_dummy_percentile, skip_existing)
         for aid in animals
     ]
 

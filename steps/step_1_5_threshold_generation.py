@@ -923,15 +923,16 @@ def run_global_tuning_all_animals(
     session_group_regex: Optional[str] = None,
     session_pair_strategy: str = 'consecutive',
     max_pairs_per_animal: int = 10,
+    skip_existing: bool = True,
     **kwargs,
 ) -> List[Dict]:
     import time as _time
     print(f"[CANARY] run_global_tuning_all_animals v2 called", file=sys.stderr, flush=True)
 
-    # Skip if calibration results already exist
+    # Skip if calibration results already exist (honors skip_existing flag)
     step1_5_dir = Path(output_dir) / "step_1_5_results"
     summary_json = step1_5_dir / "all_animals_summary.json"
-    if summary_json.exists():
+    if skip_existing and summary_json.exists():
         logger.info(f"[STEP 1.5] Calibration results already exist → {summary_json.name}, skipping.")
         logger.info(f"[STEP 1.5] Delete {summary_json} to force recalibration.")
         import json

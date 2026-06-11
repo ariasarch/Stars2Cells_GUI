@@ -4,189 +4,197 @@ STARS2CELLS PIPELINE - INPUT FILE FORMAT SPECIFICATION
 
 OVERVIEW
 --------
-The Stars2Cells pipeline requires neuron centroid data in a specific .npy
-format. Each session must be saved as a separate file with standardized naming
-and internal structure.
+The Stars2Cells pipeline requires neuron centroid data per session. Two input
+formats are accepted: a dictionary (recommended) or a raw 3D footprint matrix.
+Each session is a separate .npy file with a standardized filename.
 
 
 FILE NAMING CONVENTION
 ----------------------
-Format: {animal_id}_{session_id}.npy
+Pattern (regex): ^([A-Za-z0-9_]+?)_(\d+)(.*?)\.npy$
 
-Requirements:
-  - Both animal_id and session_id must be numeric strings
-  - Use underscore (_) as separator
-  - File extension must be .npy
+  Group 1 (animal_id):  alphanumeric + underscores  (NON-greedy)
+  Group 2 (session_id): one or more DIGITS          (required)
+  Group 3 (suffix):     optional trailing text before .npy
+
+The pipeline extracts:
+  - animal_id   = group 1
+  - session_name = full filename stem (without .npy)
 
 Examples:
-  ✓ 408021_758519303.npy
-  ✓ 12345_67890.npy
-  ✗ mouse1_session1.npy        (non-numeric IDs)
-  ✗ 408021-758519303.npy       (wrong separator)
+  ✓ 408021_758519303.npy             → animal=408021,    session=758519303
+  ✓ mouse1_758519303.npy             → animal=mouse1,    session=758519303
+  ✓ subj_a_758519303_postlearn.npy   → animal=subj_a,    session_name keeps the suffix
+  ✓ 12345_67890.npy                  → animal=12345,     session=67890
+  ✗ mouse1_session1.npy              (session portion is not all digits)
+  ✗ 408021-758519303.npy             (wrong separator)
+  ✗ 758519303.npy                    (no animal_id segment)
+
+NOTE: Although animal_id may contain underscores, the regex is non-greedy and
+splits at the FIRST underscore-followed-by-digits. If your animal_id ends in
+digits, it can be ambiguous — prefer animal_id segments that end in a letter
+or underscore (e.g. `mouse_a_758519303.npy`, not `mouse5_758519303.npy` if
+you intend the `5` to be part of the animal name).
 
 
-FILE CONTENTS
--------------
-Each .npy file must contain a Python dictionary saved with numpy's save
-function using allow_pickle=True.
+────────────────────────────────────────────────────────────────────────────────
+FORMAT 1 (RECOMMENDED): DICTIONARY
+────────────────────────────────────────────────────────────────────────────────
 
-The dictionary MUST contain these 5 required keys:
+A Python dict saved with `np.save(..., allow_pickle=True)`.
 
-1. centroids_x (array/list)
-   - X-coordinates of neuron centroids in pixels
-   - Type: numpy array or list of numbers
-   - Length: N (number of neurons)
+REQUIRED keys:
+  1. centroids_x  (array/list of N floats — X-coordinates in pixels)
+  2. centroids_y  (array/list of N floats — Y-coordinates in pixels)
 
-2. centroids_y (array/list)
-   - Y-coordinates of neuron centroids in pixels
-   - Type: numpy array or list of numbers
-   - Length: N (must match centroids_x)
+OPTIONAL keys (used if present, otherwise auto-generated):
+  3. roi_ids     (array/list of N unique IDs — ints or strings)
+                 → if missing, defaults to np.arange(N)
 
-3. roi_ids (array/list)
-   - Unique identifier for each neuron/ROI
-   - Type: numpy array or list (integers or strings)
-   - Length: N (must match centroids)
-   - Each ID should be unique within the session
+IGNORED keys (the pipeline does NOT read these from the dict — animal_id and
+session come from the FILENAME):
+  - subject_id, session_id, footprints, traces, timestamps, etc.
+  Including them is harmless; they're simply not used.
 
-4. subject_id (string or int)
-   - Subject/animal identifier
-   - Should match the animal_id from the filename
+Data requirements:
+  ✓ len(centroids_x) == len(centroids_y)
+  ✓ len(roi_ids) == len(centroids_x)  (if provided)
+  ✓ N >= 4  (sessions with fewer neurons are skipped)
+  ✓ Pixel coordinates (typically origin at top-left)
+  ✓ ROI IDs unique within session (if provided)
 
-5. session_id (string or int)
-   - Session identifier
-   - Should match the session_id from the filename
+Internal note: the pipeline stacks centroids as (y, x) order internally — you
+still pass them in as separate centroids_x and centroids_y keys.
 
 
-DATA REQUIREMENTS
------------------
-✓ Array lengths: len(centroids_x) == len(centroids_y) == len(roi_ids)
-✓ Minimum neurons: At least 4 neurons per session (sessions with <4 skipped)
-✓ Coordinate system: Pixel coordinates (typically 0,0 at top-left)
-✓ Centroid precision: Float or integer values accepted
-✓ ROI IDs: Must be unique within each session
+────────────────────────────────────────────────────────────────────────────────
+FORMAT 2 (FALLBACK): RAW 3D FOOTPRINT MATRIX (A MATRIX)
+────────────────────────────────────────────────────────────────────────────────
+
+A 3D numpy array of shape (H, W, N) — the spatial footprints for N neurons.
+The pipeline auto-extracts centroids via `extract_centroids_from_A` and
+generates sequential roi_ids via np.arange(N).
+
+Use this only if you already have an A matrix; Format 1 is preferred because
+it's smaller and avoids re-running centroid extraction.
 
 
-PYTHON CODE TO CREATE FILE
----------------------------
+PYTHON CODE — FORMAT 1 (DICT)
+------------------------------
 import numpy as np
 
-# Your neuron data
-centroids_x = [123.4, 456.7, 789.0, 234.1]  # X coordinates in pixels
-centroids_y = [234.5, 567.8, 890.1, 345.2]  # Y coordinates in pixels
-roi_ids = [0, 1, 2, 3]                       # Unique ID for each neuron
+centroids_x = [123.4, 456.7, 789.0, 234.1]
+centroids_y = [234.5, 567.8, 890.1, 345.2]
+roi_ids     = [0, 1, 2, 3]   # optional
 
-# Create the required dictionary
 data = {
     'centroids_x': np.array(centroids_x),
     'centroids_y': np.array(centroids_y),
-    'roi_ids': np.array(roi_ids),
-    'subject_id': '408021',      # Animal ID (matches filename)
-    'session_id': '758519303'    # Session ID (matches filename)
+    'roi_ids':     np.array(roi_ids),   # optional
 }
 
-# Save to file with proper naming
-filename = f"{data['subject_id']}_{data['session_id']}.npy"
-np.save(filename, data, allow_pickle=True)
+# Filename: animal_id must end before the first `_<digits>` segment
+np.save('408021_758519303.npy', data, allow_pickle=True)
 
 
-LOADING AND VERIFYING FILE
----------------------------
+LOADING AND VERIFYING A FILE
+-----------------------------
 import numpy as np
+from pathlib import Path
+import re
 
-# Load the file
-data = np.load('408021_758519303.npy', allow_pickle=True).item()
+path = Path('408021_758519303.npy')
 
-# Verify structure
-required_keys = ['centroids_x', 'centroids_y', 'roi_ids', 'subject_id', 'session_id']
-assert all(key in data for key in required_keys), "Missing required keys"
+# 1. Filename check
+assert re.match(r'^([A-Za-z0-9_]+?)_(\d+)(.*?)\.npy$', path.name), "Bad filename"
 
-# Verify array lengths match
-n_neurons = len(data['centroids_x'])
-assert len(data['centroids_y']) == n_neurons, "centroids_y length mismatch"
-assert len(data['roi_ids']) == n_neurons, "roi_ids length mismatch"
-assert n_neurons >= 4, f"Need at least 4 neurons, found {n_neurons}"
+# 2. Load
+raw = np.load(path, allow_pickle=True)
 
-print(f"✓ File valid: {n_neurons} neurons")
+# 3. Format 1 (dict) or Format 2 (3D A matrix)?
+if isinstance(raw, np.ndarray) and raw.ndim == 0:
+    data = raw.item()
+    assert isinstance(data, dict), "0-d array did not contain a dict"
+    assert 'centroids_x' in data and 'centroids_y' in data, "Missing centroids"
+    n = len(data['centroids_x'])
+    assert len(data['centroids_y']) == n, "centroids_y length mismatch"
+    if 'roi_ids' in data:
+        assert len(data['roi_ids']) == n, "roi_ids length mismatch"
+    print(f"✓ Format 1 (dict): {n} neurons")
 
+elif isinstance(raw, np.ndarray) and raw.ndim == 3:
+    n = raw.shape[2]
+    print(f"✓ Format 2 (A matrix): {n} neurons, shape {raw.shape}")
 
-EXAMPLE FILE STRUCTURE
-----------------------
-{
-    'centroids_x': array([123.4, 456.7, 789.0, 234.1]),
-    'centroids_y': array([234.5, 567.8, 890.1, 345.2]),
-    'roi_ids': array([0, 1, 2, 3]),
-    'subject_id': '408021',
-    'session_id': '758519303',
-    
-    # Optional: You can include additional fields (will be ignored)
-    'footprints': ...,
-    'traces': ...,
-    'timestamps': ...,
-}
+else:
+    raise ValueError("Unrecognised file format")
+
+assert n >= 4, f"Need at least 4 neurons, found {n}"
 
 
 VALIDATION CHECKLIST
 --------------------
-Before running the pipeline, verify each file:
-
-□ Filename matches pattern: {animal_id}_{session_id}.npy
-□ File loads successfully: np.load(file, allow_pickle=True).item()
-□ Returns a dictionary (not array or other type)
-□ Contains all 5 required keys
-□ centroids_x, centroids_y, roi_ids all have same length
-□ At least 4 neurons present
-□ subject_id and session_id in dict match filename
+□ Filename matches: ^([A-Za-z0-9_]+?)_(\d+)(.*?)\.npy$
+□ File loads via np.load(..., allow_pickle=True)
+□ Either a dict (Format 1) or a 3D ndarray (Format 2)
+□ For Format 1: centroids_x and centroids_y both present, equal length
+□ For Format 1: if roi_ids present, length matches centroids
+□ N >= 4 neurons
 
 
 COMMON ERRORS
 -------------
-Error: "Not enough neurons (X < 4)"
-  → Session has fewer than 4 neurons and will be skipped
+"Not enough neurons (N < 4)"
+  → Session has fewer than 4 neurons; will be skipped.
 
-Error: "Missing required fields"
-  → Dictionary doesn't contain all 5 required keys
+"NO MATCH: filename.npy"
+  → Filename doesn't match the regex. Check that the session segment is all
+    digits and that segments are separated by underscores.
 
-Error: "NO MATCH: filename.npy"
-  → Filename doesn't match {animal_id}_{session_id}.npy pattern
+"Unrecognised file format"
+  → File is neither a dict (in a 0-d ndarray) nor a 3D ndarray. Check that
+    you saved the dict with allow_pickle=True.
 
-Error: "File is not a dictionary"
-  → .npy file doesn't contain a dict (might be raw array)
+KeyError: 'centroids_x'  or  KeyError: 'centroids_y'
+  → Format 1 dict is missing a required centroid array.
 
 
 DIRECTORY STRUCTURE
 -------------------
-Place all .npy files in a single input directory:
-
 input_directory/
 ├── 408021_758519303.npy
 ├── 408021_758519304.npy
 ├── 408021_758519305.npy
 └── 412345_758519400.npy
 
-Then run: python run_step_1_parallel.py --input-dir input_directory/
+Run with:
+    python run_step_1_parallel.py --input-dir input_directory/
+
+Optional filter to a single animal:
+    config.animal_id = "408021"   # only sessions where group(1) == "408021"
 
 
 CONVERTING FROM OTHER FORMATS
 ------------------------------
-From MATLAB/Suite2P:
-  - Extract stat.mat or F.npy with ROI coordinates
-  - Convert to Python dict with required keys
-  - Save with np.save(file, data, allow_pickle=True)
+From MATLAB / Suite2P:
+  Extract stat.mat or F.npy with ROI coordinates → build centroids_x/y arrays
+  → save as Format 1 dict.
 
 From CaImAn:
-  - Use cnm.estimates.coordinates to get centroids
-  - Package into required dict format
+  Use cnm.estimates.coordinates → centroids_x/y → Format 1 dict.
+  Or save cnm.estimates.A reshaped to (H, W, N) → Format 2.
 
 From EXTRACT:
-  - Parse output.mat for centroids
-  - Convert to numpy arrays and save
+  Parse output.mat for centroids → Format 1 dict.
 
 
 NOTES
 -----
-- The pipeline internally converts centroids to (y, x) order for processing
-- Additional metadata fields are allowed but ignored
-- ROI IDs don't need to be sequential (can be any unique values)
-- Coordinate units are pixels (no conversion applied)
-- All sessions for one animal should use consistent coordinate system
+- The pipeline internally stacks centroids as (y, x); callers still pass
+  centroids_x and centroids_y as separate keys.
+- Extra dict keys are allowed and ignored (subject_id, session_id, footprints,
+  traces, timestamps, etc.).
+- ROI IDs don't need to be sequential, but must be unique within a session.
+- All units are pixels; no coordinate transformation is applied.
+- Use a consistent coordinate system across sessions for the same animal.
 ================================================================================

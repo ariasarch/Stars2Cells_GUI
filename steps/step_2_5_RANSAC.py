@@ -323,7 +323,20 @@ def filter_quads_by_transform(
     )
 
     n_inliers = int(np.sum(inlier_mask))
-    inlier_ratio = n_inliers / n_quads if n_quads > 0 else 0.0
+    inlier_ratio = n_inliers / n_quads if n_quads > 0 else 0.0  # raw-quad ratio (diagnostic only)
+
+    # ── Neuron coverage: the meaningful acceptance metric ─────────────────────
+    # The raw-quad inlier ratio is combinatorially deflated. Step 2 emits FAR more
+    # candidate quad matches than there are true neuron correspondences (e.g. ~380k
+    # quads for ~550 matchable neurons), so even a perfect rigid transform scores a
+    # low %. What matters is how many DISTINCT neurons are recovered with a
+    # geometrically consistent (inlier) quad — that is coverage, computed here.
+    n_matchable = min(len(ref_centroids), len(tgt_centroids))
+    if n_inliers > 0:
+        n_covered = int(np.unique(ref_quad_indices[inlier_mask].ravel()).size)
+    else:
+        n_covered = 0
+    neuron_coverage = min(n_covered / n_matchable, 1.0) if n_matchable > 0 else 0.0
 
     if A is not None and n_inliers > 0:
         residuals = np.linalg.norm(
@@ -334,7 +347,9 @@ def filter_quads_by_transform(
         scale = np.sqrt(max(np.linalg.det(A), 0.0))
         translation_mag = np.linalg.norm(t)
 
-        logger.info(f"  [FILTER] Result: {n_inliers:,}/{n_quads:,} inliers ({100*inlier_ratio:.1f}%) | "
+        logger.info(f"  [FILTER] Result: {n_inliers:,}/{n_quads:,} inlier quads "
+                     f"({100*inlier_ratio:.1f}% of quads) | coverage {n_covered}/{n_matchable} "
+                     f"neurons ({100*neuron_coverage:.1f}%) | "
                      f"rot={rotation_deg:.2f}° trans=({t[0]:.1f},{t[1]:.1f})px scale={scale:.4f} "
                      f"median_resid={np.median(inlier_residuals):.2f}px")
 
@@ -374,6 +389,9 @@ def filter_quads_by_transform(
             'n_quads_total': int(n_quads),
             'n_inliers': n_inliers,
             'inlier_ratio': float(inlier_ratio),
+            'neuron_coverage': float(neuron_coverage),
+            'n_neurons_covered': int(n_covered),
+            'n_matchable_neurons': int(n_matchable),
             'translation_x': float(t[0]),
             'translation_y': float(t[1]),
             'translation_magnitude': float(translation_mag),
@@ -394,11 +412,23 @@ def filter_quads_by_transform(
             'transform_matrix': None,
         }
 
-    if inlier_ratio < min_inlier_ratio:
-        logger.warning(f"  [FILTER] Rejected: inlier ratio {inlier_ratio:.1%} < {min_inlier_ratio:.1%}")
+    # ── Acceptance gate: neuron coverage, NOT raw-quad ratio ──────────────────
+    # `min_inlier_ratio` is now the minimum fraction of MATCHABLE NEURONS that must
+    # be recovered with a geometrically consistent quad (coverage). The old gate
+    # divided inliers by the candidate-quad count, which is combinatorially inflated
+    # and rejected good registrations (see note above). Setting rejected_reason here
+    # also keeps the summary from mislabeling these as RANSAC failures / "noise".
+    if neuron_coverage < min_inlier_ratio:
+        reason = (f"neuron coverage {neuron_coverage:.1%} ({n_covered}/{n_matchable}) "
+                  f"< min {min_inlier_ratio:.1%}")
+        logger.warning(f"  [FILTER] Rejected: {reason}")
+        transform_info['rejected_reason'] = transform_info.get('rejected_reason') or reason
+        transform_info['n_inliers'] = 0
+        transform_info['inlier_ratio'] = 0.0
         return np.zeros(n_quads, dtype=bool), transform_info
 
-    logger.info(f"  [FILTER] Accepted ({inlier_ratio:.1%} >= {min_inlier_ratio:.1%})")
+    logger.info(f"  [FILTER] Accepted (coverage {neuron_coverage:.1%} "
+                f"≥ min {min_inlier_ratio:.1%}; {n_inliers:,} inlier quads)")
     return inlier_mask, transform_info
 
 
@@ -628,6 +658,8 @@ def run_step_2_5_ransac(
     ransac_max_translation_px: Optional[float] = None,
     processes: Optional[int] = None,
     verbose: bool = True,
+    skip_existing: bool = False,   # default off so direct callers still recompute;
+                                   # the GUI forwards config.skip_existing explicitly
 ) -> List[Dict[str, Any]]:
     """
     Run Step 2.5: RANSAC-based geometric filtering of descriptor matches.
@@ -638,6 +670,8 @@ def run_step_2_5_ransac(
                                  None = no limit (default).
         ransac_max_translation_px: Reject transforms with translation magnitude > this (pixels).
                                    None = no limit (default).
+        skip_existing: If True, skip pairs whose *_filtered_matches.npz already
+                       exists and carry their prior summary entries forward.
     """
     log_dir = Path(output_dir) / "logs_step2_5_ransac"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -668,6 +702,40 @@ def run_step_2_5_ransac(
     logger.info(f"Transform limits: max_rotation={rot_limit_str}, max_translation={trans_limit_str}")
 
     step2_5_dir = ensure_output_dir(output_dir, 2.5, verbose=False)
+
+    # ── Honor skip_existing: skip pairs whose filtered output already exists ───
+    # Step 3 reads the *_filtered_matches.npz files straight from disk, so the
+    # skipped pairs' data is preserved. We also carry their prior summary entries
+    # forward so all_pairs_summary.json stays complete after a partial re-run.
+    prior_results: List[Dict[str, Any]] = []
+    if skip_existing:
+        pending, done_stems = [], []
+        for mf in match_files:
+            stem = mf.stem.replace('_matches_light', '')
+            if (step2_5_dir / f"{stem}_filtered_matches.npz").exists():
+                done_stems.append(stem)
+            else:
+                pending.append(mf)
+        n_skipped = len(match_files) - len(pending)
+        if n_skipped:
+            logger.info(f"skip_existing: {n_skipped} pair(s) already filtered; "
+                        f"{len(pending)} remaining")
+            summary_path = step2_5_dir / "all_pairs_summary.json"
+            if summary_path.exists():
+                try:
+                    import json as _json
+                    with open(summary_path) as _f:
+                        prior = _json.load(_f)
+                    done_set = set(done_stems)
+                    prior_results = [r for r in prior
+                                     if isinstance(r, dict) and r.get('pair_name') in done_set]
+                except Exception as _e:
+                    logger.warning(f"skip_existing: could not reuse prior summary: {_e}")
+        match_files = pending
+        if not match_files:
+            logger.info("skip_existing: all pairs already filtered — nothing to do")
+            save_json_summary(prior_results, step2_5_dir / "all_pairs_summary.json")
+            return prior_results
 
     config = PipelineConfig(input_dir=input_dir, output_dir=output_dir, verbose=verbose)
     config.ransac_max_residual = ransac_max_residual
@@ -780,6 +848,12 @@ def run_step_2_5_ransac(
     logger.info(f"All {len(match_files)} pairs processed in {elapsed:.1f}s "
                 f"({elapsed / len(match_files):.2f}s/pair avg)")
 
+    # ── Merge carried-forward (skipped) pairs back in before summarizing ──────
+    if prior_results:
+        logger.info(f"skip_existing: merging {len(prior_results)} previously-"
+                    f"filtered pair(s) into the summary")
+        results = prior_results + results
+
     # ── Save summary ─────────────────────────────────────────────────────────
     summary_file = step2_5_dir / "all_pairs_summary.json"
     save_json_summary(results, summary_file)
@@ -795,11 +869,17 @@ def run_step_2_5_ransac(
 
         logger.info(f"Total descriptor matches: {total_desc:,}")
         logger.info(f"Total geometric inliers: {total_filtered:,}")
-        logger.info(f"Overall filtering ratio: {100 * total_filtered / total_desc:.1f}%")
+        logger.info(f"Overall quad filtering ratio: {100 * total_filtered / total_desc:.1f}% "
+                    f"(expected low — quad candidates vastly outnumber true neuron pairs)")
 
-        if total_filtered / total_desc < 0.05:
-            logger.warning(f"Very low inlier ratio ({100 * total_filtered / total_desc:.2f}%) — "
-                          f"descriptor matches may be mostly false positives")
+        coverages = [r.get('neuron_coverage', 0.0) for r in results]
+        avg_coverage = float(np.mean(coverages)) if coverages else 0.0
+        logger.info(f"Avg neuron coverage: {100 * avg_coverage:.1f}% (the acceptance metric)")
+
+        if avg_coverage < 0.05:
+            logger.warning(f"Low neuron coverage ({100 * avg_coverage:.1f}%) — few neurons "
+                          f"recovered a geometrically consistent match; check alignment "
+                          f"and centroids, not just quad counts")
 
             rotations = [abs(r.get('rotation_deg', 0)) for r in results if r.get('rotation_deg') is not None]
             translations = [r.get('translation_magnitude', 0) for r in results if r.get('translation_magnitude') is not None]
@@ -819,9 +899,11 @@ def run_step_2_5_ransac(
             n_ransac_failed = sum(1 for r in results
                                  if not r.get('rejected_reason') and r.get('n_geometric_inliers', 0) == 0)
             if n_rejected_by_limits > 0 and n_rejected_by_limits == len(results):
-                logger.info(f"  ⚠ ALL {n_rejected_by_limits} pairs were rejected by transform limits, "
-                            f"not by RANSAC itself. Relax max_rotation_deg / max_translation_px "
-                            f"or set to None (no limit) to see what RANSAC actually finds.")
+                logger.info(f"  ⚠ ALL {n_rejected_by_limits} pairs were rejected by acceptance "
+                            f"criteria (neuron coverage and/or transform limits), NOT by RANSAC "
+                            f"finding zero inliers. See each pair's 'rejected_reason' below; "
+                            f"lower min_inlier_ratio (coverage) or relax max_rotation_deg / "
+                            f"max_translation_px as appropriate.")
             elif n_ransac_failed > 0:
                 logger.info(f"  {n_ransac_failed} pairs had 0 RANSAC inliers (before limit checks) — "
                             f"descriptor matches are likely noise for these pairs.")
@@ -829,7 +911,7 @@ def run_step_2_5_ransac(
             logger.info(f"  Suggestions: increase descriptor_threshold in Step 2, "
                         f"check session alignment, verify centroids")
         else:
-            logger.info(f"Data quality looks good ({100 * total_filtered / total_desc:.1f}% inliers)")
+            logger.info(f"Data quality looks good (avg neuron coverage {100 * avg_coverage:.1f}%)")
 
         # Report rejected pairs
         rejected = [r for r in results if r.get('rejected_reason')]

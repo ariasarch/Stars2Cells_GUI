@@ -140,18 +140,20 @@ The threshold is: any neuron with fewer quads than `min_coverage_fraction × med
 
 ### `session_filename_regex` — File Naming Convention
 
-**Default:** `^([A-Za-z0-9_]+?)_(\d+)__.*\.npy$`
+**Default:** `^([A-Za-z0-9_]+?)_(\d+)(.*?)\.npy$`
 
-Regex with exactly two capture groups: `(animal_id, session_number)`. This is how the pipeline knows which `.npy` files belong to the same animal and in what order.
+Regex with three capture groups: `(animal_id, session_number, optional_suffix)`. This is how the pipeline knows which `.npy` files belong to the same animal and in what order. The session_number must be all digits; the suffix (anything between the session number and `.npy`) is allowed but not required.
 
 **If your files aren't being found**, this is the first thing to check. The pipeline logs every filename it tries to match and every one that fails. The regex must match your naming convention exactly. Common pitfalls:
 - Your animal IDs contain hyphens but the regex only allows `[A-Za-z0-9_]`
-- Your session numbers aren't purely numeric
-- You have extra underscores that make the non-greedy `+?` match too early
+- Your session numbers aren't purely numeric (the regex requires `\d+`)
+- Your animal_id ends in digits and the non-greedy `+?` splits at the wrong underscore — prefer animal_ids that end in a letter or underscore (`mouse_a_758519303.npy`, not `mouse5_758519303.npy` if you intended `mouse5` as the animal)
 
-**Example for `Mouse42_Session3__fov1.npy`:** The default regex extracts `animal_id = "Mouse42"`, `session_number = "3"`.
+**Example for `408021_758519303.npy`:** Default regex extracts `animal_id = "408021"`, `session_number = "758519303"`, suffix empty.
 
-**Example for `M42-LHb_003_preprocessed.npy`:** You'd need something like `^([A-Za-z0-9_-]+?)_(\d+)_.*\.npy$`.
+**Example for `Mouse42_3__fov1.npy`:** Default regex extracts `animal_id = "Mouse42"`, `session_number = "3"`, suffix `__fov1`. The suffix is then available for `session_group_regex` (Step 1.5) to identify which sessions share an FOV.
+
+**Example for `M42-LHb_003_preprocessed.npy`:** You'd need something like `^([A-Za-z0-9_-]+?)_(\d+)_.*\.npy$` to allow the hyphen in the animal_id.
 
 ---
 
@@ -393,7 +395,9 @@ Similar logic to rotation constraint. For a 512×512 FOV with chronic window ima
 
 ## Step 3: Neuron Matching
 
-Step 3 takes the RANSAC-filtered quad matches and transform from Step 2.5 and produces the final neuron-to-neuron assignments. It uses a padded Hungarian algorithm with optional second-pass recovery.
+Step 3 takes the RANSAC-filtered quad matches and transform from Step 2.5 and produces the final neuron-to-neuron assignments. It uses a padded Hungarian algorithm followed by automatic second-pass recovery on any remaining unmatched neurons. Each surviving match also gets a per-pair confidence score in `[0, 1]` (saved as `match_confidence` in the sweep NPZ files), and consolidated tracks inherit a per-track confidence as the weakest link in their chain (saved as `track_confidence` in the consolidated tracking NPZ).
+
+> **Use the confidence outputs, not the raw cost.** The `matched_costs` field in the sweep NPZ depends on whether you enabled quad voting and which dummy-cost regime you used, so cost thresholds aren't comparable across runs. `match_confidence` is normalized to `[0, 1]` and combines four signals (degree-normalized votes, spatial proximity, assignment margin, and pass-1 vs pass-2 origin), making it the right field to threshold on for downstream analyses. See `exporting_data.txt` for the full output schema.
 
 ### `use_quad_voting` — Cost Matrix Strategy
 
@@ -552,7 +556,7 @@ When your results don't look right, work through these in order:
 → The cost matrix is too restrictive. Try increasing `dist_cutoff_multiplier` or enabling asymmetric dummy costs. Check the Step 3 viewer for the cost distribution — if most costs are infinite, the cutoff is too tight.
 
 **9. Step 3 produces obvious false matches**
-→ Enable `block_zero_vote_pairs`, reduce `pass2_dummy_percentile`, or tighten `postfilter_residual_multiplier`. If false matches are concentrated at the FOV boundary, enable `use_asymmetric_dummy_costs`.
+→ Look at the `match_confidence` distribution in the sweep NPZ first — false matches usually cluster at low confidence (typically below 0.3), and a long tail there is a clearer diagnostic than spotting individual bad matches. Then: enable `block_zero_vote_pairs`, reduce `pass2_dummy_percentile`, or tighten `postfilter_residual_multiplier`. If false matches are concentrated at the FOV boundary, enable `use_asymmetric_dummy_costs`. If false matches are mostly `match_pass == 2`, the second-pass cutoff is too permissive — reduce `pass2_cutoff_multiplier` or `pass2_dummy_percentile`.
 
 **10. Tracking shows neurons "appearing" that should have been tracked**
 → The pass-2 recovery isn't reaching far enough. Increase `pass2_cutoff_multiplier` or `pass2_dummy_percentile`.
@@ -561,6 +565,6 @@ When your results don't look right, work through these in order:
 
 ## A Note on Reproducibility
 
-Every parameter in this pipeline is saved in the output files. The Step 1 NPZ includes `generation_method: "diagonal_first"`. Step 1.5 saves the full threshold sweep. Step 3 saves the cost matrix parameters. If you can't reproduce a result, compare the saved parameters between runs.
+Every parameter in this pipeline is saved in the output files. The Step 1 NPZ includes `generation_method: "diagonal_first"`. Step 1.5 saves the full threshold sweep. Step 3 saves its parameters in `step3_summary.json` and persists per-match diagnostics (`match_confidence`, `match_pass`, `matched_costs`) in each `*_sweep.npz` plus per-track confidence (`track_confidence`, `track_mean_confidence`) in `{animal_id}_consolidated_tracking.npz` — so even if you forget which run produced which file, you can compare both the inputs (parameters) and the outputs (confidence distributions) directly. If you can't reproduce a result, compare the saved parameters between runs first, then look at the confidence histograms.
 
-The pipeline is deterministic given identical inputs and parameters, with one exception: `diagonal_rng_seed` controls the random long-range diagonals in Step 1. 
+The pipeline is deterministic given identical inputs and parameters, with one exception: `diagonal_rng_seed` controls the random long-range diagonals in Step 1.

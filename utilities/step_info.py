@@ -304,7 +304,8 @@ STEP_METADATA = {
                 'threshold_max',
                 'n_threshold_points',
                 'session_group_regex',
-                'session_pair_strategy'
+                'session_pair_strategy',
+                'skip_existing'
             ]
         },
         'progress_signal': 'animal_progress',
@@ -394,6 +395,7 @@ STEP_METADATA = {
                 'ransac_min_inlier_ratio',
                 'ransac_max_rotation_deg',
                 'ransac_max_translation_px',
+                'skip_existing',
             ]
         },
         'progress_signal': 'animal_progress',
@@ -446,6 +448,7 @@ STEP_METADATA = {
                 'postfilter_residual_multiplier',
                 'pass2_cutoff_multiplier',
                 'pass2_dummy_percentile',
+                'skip_existing',
             ]
         },
         'progress_signal': 'animal_progress',
