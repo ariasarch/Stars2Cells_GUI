@@ -22,8 +22,8 @@ from pathlib import Path
 # USER CONFIG — edit these
 # ═══════════════════════════════════════════════════════════════════════════════
 
-INPUT_DIR  = r"C:\Users\ariAccount\Desktop\Stars2CellsPaper\Stars2Cells_Benchmark_1000n_Tier_C"
-OUTPUT_DIR = r"C:\Users\ariAccount\Desktop\Stars2CellsPaper\Stars2Cells_Benchmark_1000n_Tier_C"
+INPUT_DIR  = r"C:\Users\ariAccount\Desktop\BE_DMS_MPS_Validation\cellreg_input"
+OUTPUT_DIR = r"C:\Users\ariAccount\Desktop\BE_DMS_MPS_Validation\cellreg_output"
 
 # Which steps to run (set False to skip)
 RUN_STEP_1   = True

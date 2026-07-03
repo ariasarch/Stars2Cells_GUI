@@ -222,8 +222,88 @@ def load_step1_statistics(output_dir: str, verbose: bool = False) -> Dict[str, A
         animal_data['n_sessions'] = animal_data.pop('n_pairs', 0)
     return stats
 
+def _decode_pair_name(value: Any, fallback: str) -> str:
+    """Decode a pair-name entry from an NPZ (object / bytes / numpy str)."""
+    try:
+        if value is None:
+            return fallback
+        if hasattr(value, 'item'):
+            value = value.item()
+        if isinstance(value, bytes):
+            value = value.decode('utf-8')
+        return str(value)
+    except Exception:
+        return fallback
+
+def _compute_step1_5_pair_breakdown(data: dict) -> list:
+    """Per-pair match-rate breakdown for one animal's calibration NPZ.
+
+    Returns one row per session pair: the % of sampled quads that matched at
+    the animal's optimal threshold (so the per-pair rates average to the
+    headline Quad Match Rate). Returns [] for older files that predate the
+    per-threshold match-count arrays.
+    """
+    n_filtered = data.get('n_filtered_per_threshold', None)
+    n_matches  = data.get('n_matches_per_threshold', None)
+    ref_sizes  = data.get('reference_sizes', None)
+    pair_names = data.get('pair_names', None)
+    thresholds = data.get('test_thresholds', None)
+    N_values   = data.get('N_values', None)
+
+    counts = n_filtered if n_filtered is not None else n_matches
+    if counts is None or ref_sizes is None:
+        return []
+    counts = np.asarray(counts)
+    if counts.ndim != 2 or counts.shape[0] == 0:
+        return []
+    used_raw = n_filtered is None
+
+    ref_sizes = np.asarray(ref_sizes).ravel()
+    N_arr = np.asarray(N_values).ravel() if N_values is not None else np.array([])
+
+    # Evaluate every pair at the animal's optimal threshold index.
+    opt_idx = counts.shape[1] - 1
+    if 'optimal_threshold' in data and thresholds is not None:
+        thr = np.asarray(thresholds).ravel()
+        if thr.size:
+            opt_idx = int(np.argmin(np.abs(thr - float(data['optimal_threshold']))))
+    opt_idx = max(0, min(opt_idx, counts.shape[1] - 1))
+
+    rows = []
+    for p in range(counts.shape[0]):
+        ref = float(ref_sizes[p]) if p < ref_sizes.size else 0.0
+        cnt = float(counts[p, opt_idx])
+        rows.append({
+            'pair_name': _decode_pair_name(
+                pair_names[p] if pair_names is not None and p < len(pair_names) else None,
+                f'Pair {p + 1}'),
+            'match_pct': (cnt / ref) if ref > 0 else 0.0,
+            'n_matched': cnt,
+            'ref_size': ref,
+            'N': float(N_arr[p]) if p < N_arr.size else None,
+            'used_raw': used_raw,
+        })
+    return rows
+
 def load_step1_5_statistics(output_dir: str, verbose: bool = False) -> Dict[str, Any]:
-    return load_step_statistics(1.5, output_dir, verbose)
+    stats = load_step_statistics(1.5, output_dir, verbose)
+    # The generic loader only reads scalar extract_fields; attach the per-pair
+    # match-rate breakdown by re-reading each animal's calibration NPZ.
+    step_dir = get_step_output_dir(1.5, output_dir)
+    animals = stats.get('animals') or {}
+    if step_dir.exists():
+        for npz_path in sorted(step_dir.glob(get_step_file_pattern(1.5))):
+            try:
+                data = np.load(npz_path, allow_pickle=True)
+            except Exception as e:
+                if verbose: print(f"  Pair breakdown: could not read {npz_path.name}: {e}")
+                continue
+            animal_id = _decode_field(data.get('animal_id', npz_path.stem.split('_')[0]))
+            if animal_id in animals:
+                rows = _compute_step1_5_pair_breakdown(data)
+                if rows:
+                    animals[animal_id]['pair_breakdown'] = rows
+    return stats
 
 def load_step2_statistics(output_dir: str, verbose: bool = False) -> Dict[str, Any]:
     return load_step_statistics(2, output_dir, verbose)

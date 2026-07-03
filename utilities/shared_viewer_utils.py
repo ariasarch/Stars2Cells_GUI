@@ -176,6 +176,21 @@ def create_stats_tab(step: float, output_dir: str, parent_widget: Optional[QWidg
     refresh_stats()
     return tab, text_edit, refresh_stats
 
+def _fmt_stat_value(value: Any) -> str:
+    """Format a single stat value for text display.
+
+    Ints get thousands separators; small floats (e.g. calibration C ≈ 0.002)
+    keep 4 decimals so they don't collapse to '0.00'; larger floats use 2.
+    """
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, (int, np.integer)):
+        return f"{int(value):,}"
+    if isinstance(value, (float, np.floating)):
+        v = float(value)
+        return f"{v:.4f}" if v != 0 and abs(v) < 0.1 else f"{v:.2f}"
+    return str(value)
+
 def _format_step_statistics(step: float, stats: dict) -> str:
     """Format statistics for display - step-agnostic formatter"""
     step_info = get_step_info(step)
@@ -183,7 +198,14 @@ def _format_step_statistics(step: float, stats: dict) -> str:
              f"Total Animals: {stats.get('n_animals', 0)}"]
     
     if 'n_sessions' in stats: lines.append(f"Total Sessions: {stats.get('n_sessions', 0)}")
-    if 'n_pairs' in stats: lines.append(f"Total Pairs: {stats.get('n_pairs', 0)}")
+    if 'n_pairs' in stats:
+        # `stats['n_pairs']` counts result files. For Step 2/2.5/3 that equals
+        # the session-pair count (one file per pair). For Step 1.5 there is one
+        # file PER ANIMAL, so the file count is really the animal count -- prefer
+        # the summed per-animal pair counts, which equal the file count for the
+        # other steps and the true session-pair total for Step 1.5.
+        summed_pairs = sum(a.get('n_pairs', 0) for a in (stats.get('animals') or {}).values())
+        lines.append(f"Total Pairs: {summed_pairs or stats.get('n_pairs', 0)}")
     lines.append("")
     
     stats_config = step_info['stats']
@@ -201,16 +223,41 @@ def _format_step_statistics(step: float, stats: dict) -> str:
     
     if stats.get('animals'):
         lines.extend(["\n" + "-" * 60, "PER-ANIMAL BREAKDOWN", "-" * 60])
+        # Show accumulated totals when a step defines them; otherwise fall back
+        # to the directly-extracted per-animal fields. Step 1.5 has no
+        # accumulate_fields -- it stores C / R² / n_pairs / optimal_threshold
+        # straight onto the animal dict via extract_fields -- so without this
+        # fallback the breakdown renders every animal as a blank heading.
+        per_animal_fields = (list(stats_config['accumulate_fields'].keys())
+                             or list(stats_config.get('extract_fields', [])))
         for animal_id, animal_data in stats['animals'].items():
             lines.append(f"\n{animal_id}:")
-            for field_name in stats_config['accumulate_fields'].keys():
+            for field_name in per_animal_fields:
                 if field_name in animal_data:
-                    value = animal_data[field_name]
                     display_name = field_name.replace('_', ' ').title()
-                    lines.append(f"  {display_name}: {value:,}" if isinstance(value, int) else f"  {display_name}: {value:.2f}")
-    
+                    lines.append(f"  {display_name}: {_fmt_stat_value(animal_data[field_name])}")
+            _append_pair_breakdown(lines, animal_data)
+
     lines.append("\n" + "=" * 60)
     return "\n".join(lines)
+
+def _append_pair_breakdown(lines: list, animal_data: dict) -> None:
+    """Append a per-pair match-% breakdown (Step 1.5) under an animal heading."""
+    breakdown = animal_data.get('pair_breakdown')
+    if not breakdown:
+        return
+    kind = 'raw' if breakdown[0].get('used_raw') else 'filtered'
+    opt = animal_data.get('optimal_threshold')
+    thr_note = f" @ τ={opt:.4f}" if isinstance(opt, (int, float)) else ""
+    lines.append(f"  Per-pair match rate ({kind} matches / sampled quads{thr_note}):")
+    for i, pb in enumerate(breakdown, 1):
+        ref = int(round(pb.get('ref_size', 0)))
+        n_matched = int(round(pb.get('n_matched', 0)))
+        n_note = f", N={int(round(pb['N']))}" if pb.get('N') else ""
+        lines.append(f"    [{i}] {pb['pair_name']}: {pb['match_pct'] * 100:.1f}%  "
+                     f"({n_matched:,}/{ref:,}{n_note})")
+    mean_pct = 100.0 * sum(pb['match_pct'] for pb in breakdown) / len(breakdown)
+    lines.append(f"    mean: {mean_pct:.1f}%")
 
 def create_pipeline_overview_tab(output_dir: str) -> Tuple[QWidget, QTextEdit, Callable]:
     """Create a tab showing overview statistics from ALL pipeline steps - step-agnostic"""

@@ -1,4 +1,205 @@
-# Stars2Cells Parameter Tuning Guide
+<p align="center">
+  <img src="S2C_logo.png" alt="Stars2Cells logo" width="320"/>
+</p>
+
+# Stars2Cells
+
+> **Cross-session cell registration for calcium imaging** — match the same neurons across days using rotation-, translation-, and scale-invariant geometric descriptors.
+
+## Contents
+
+- [Overview](#overview)
+- [Key features](#key-features)
+- [Pipeline at a glance](#pipeline-at-a-glance)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Input data format](#input-data-format)
+- [Output data](#output-data)
+- [Repository structure](#repository-structure)
+- [Parameter Tuning Guide](#parameter-tuning-guide)
+  - [Step 1: Quad Generation](#step-1-quad-generation)
+  - [Step 1.5: Threshold Calibration](#step-15-threshold-calibration)
+  - [Step 2: Quad Matching](#step-2-quad-matching)
+  - [Step 2.5: RANSAC Geometric Filtering](#step-25-ransac-geometric-filtering)
+  - [Step 3: Neuron Matching](#step-3-neuron-matching)
+  - [General Parameters](#general-parameters)
+- [Quick Diagnostic Checklist](#quick-diagnostic-checklist)
+- [Reproducibility](#a-note-on-reproducibility)
+- [Sample data](#sample-data)
+- [Citation and acknowledgments](#citation-and-acknowledgments)
+
+---
+
+## Overview
+
+Stars2Cells tracks individual neurons across multiple calcium-imaging sessions of the same animal. Between sessions the tissue shifts, the field of view rotates and translates, ROI counts change, and centroids jitter — yet a researcher still needs to know that neuron #42 on Monday is the same cell as neuron #88 on Friday.
+
+Instead of matching neurons by raw position, Stars2Cells matches the **geometry of their local constellations**. The idea is borrowed from astronomical star-pattern matching ("plate solving"): describe each small group of points with a signature that does not change when you rotate, translate, or rescale the field, then look for the same signatures in another image. Here the "stars" are neuron centroids and the signatures are **quads** — four-neuron descriptors invariant to translation, rotation, and scale. Hence the name: *Stars2Cells.*
+
+A quad is built from four neurons: two anchor the longest edge (the "diagonal"), and the other two ("third-points") are encoded in a 4D descriptor `(xC, yC, xD, yD)` expressed in a coordinate frame normalized by the diagonal. Two sessions that image the same tissue produce many matching quad descriptors. A RANSAC consensus step then recovers the rigid transform between sessions and rejects coincidental matches, and finally a Hungarian assignment turns the surviving geometric evidence into one-to-one neuron matches and stitches them into cross-session tracks.
+
+The pipeline runs from a **PyQt5 desktop GUI** (load → visualize → configure → run → inspect) or **headless from a script** for batch and HPC use. Both share the same engine and the same parameters.
+
+## Key features
+
+- **Invariant geometric matching** — robust to FOV rotation, translation, and scale changes between sessions; no manual alignment required.
+- **Diagonal-first quad generation** — `O(N·k·K)` memory instead of the `O(N³)` of naive triangle enumeration, so it scales to ~1000-neuron sessions.
+- **Self-calibrating threshold** — Step 1.5 fits a `τ = C·√N` scaling law so the descriptor-distance threshold adapts to neuron count automatically.
+- **RANSAC geometric verification** — every session pair gets a consensus rigid/affine transform; coincidental descriptor matches are filtered out.
+- **Confidence-scored matches and tracks** — each pair match and each consolidated track carries a `[0, 1]` reliability score for principled downstream filtering.
+- **GUI and headless runner** — interactive PyQt5 viewer with per-step inspectors, or a hard-coded-path script for unattended batch runs.
+- **Reproducible** — every parameter is written into the output files, and runs are deterministic given identical inputs (one RNG seed aside).
+
+## Pipeline at a glance
+
+Data flows through five steps. Each reads the previous step's output from a subfolder of your output directory and writes its own:
+
+| Step | Name | What it does | Writes to |
+|------|------|--------------|-----------|
+| **1** | Quad Generation | Build invariant 4D quad descriptors from neuron centroids (diagonal-first). | `step_1_results/` |
+| **1.5** | Threshold Calibration | Fit the `τ = C·√N` descriptor-distance threshold per animal. | `step_1_5_results/` |
+| **2** | Quad Matching | Find descriptor-similar quads across session pairs (FAISS or KDTree). | `step_2_results/` |
+| **2.5** | RANSAC Filtering | Estimate the session-to-session transform; keep only geometric inliers. | `step_2_5_results/` |
+| **3** | Neuron Matching | Padded Hungarian assignment + second-pass recovery → tracks + confidence. | `step_3_results/` |
+
+```
+centroids (.npy per session)
+      │
+ ┌────▼─────┐   ┌──────────────┐   ┌───────────┐   ┌──────────────┐   ┌──────────────────┐
+ │  Step 1  │──▶│   Step 1.5   │──▶│  Step 2   │──▶│   Step 2.5   │──▶│      Step 3      │
+ │  quads   │   │ threshold √N │   │ matching  │   │   RANSAC     │   │ Hungarian + track│
+ └──────────┘   └──────────────┘   └───────────┘   └──────────────┘   └──────────────────┘
+                                                                                │
+                                                          matched pairs + consolidated tracks
+```
+
+Step 1 is the foundation: **bad quads cannot be rescued downstream**, so most tuning starts there. See the [Parameter Tuning Guide](#parameter-tuning-guide) below.
+
+## Installation
+
+Stars2Cells targets **Python 3.10+**. The numeric core (`numpy`, `scipy`, and the optional but recommended `faiss-cpu`) installs best through conda; everything else via pip.
+
+```bash
+# 0. Get the code
+git clone https://github.com/<your-org>/Stars2Cells.git
+cd Stars2Cells
+
+# 1. Create and activate an environment named "s2c"
+#    (the Windows launcher expects this exact name)
+conda create -n s2c python=3.10 -y
+conda activate s2c
+
+# 2. Numeric core via conda (versions the pipeline was developed against)
+conda install -c conda-forge numpy=1.26.4 scipy=1.13.0 faiss-cpu -y
+
+# 3. Everything else via pip
+pip install -r requirements.txt
+```
+
+`faiss-cpu` accelerates Step 2 descriptor matching but is optional — the pipeline falls back to a scikit-learn KDTree if FAISS cannot be imported. The remaining dependencies (PyQt5, pyqtgraph, scikit-image, scikit-learn, matplotlib, tqdm, Pillow, imageio, tifffile, psutil, networkx) are pinned in `requirements.txt`.
+
+## Quick start
+
+### Option 1 — GUI (interactive)
+
+```bash
+python stars2cells.py
+```
+
+On Windows you can instead double-click **`launch_s2c.bat`**, which activates the `s2c` conda env and relaunches the app automatically if it crashes.
+
+Then, in the window:
+
+1. **🗂️ Load Data Folder** — point it at a directory of per-session `.npy` files (see [Input data format](#input-data-format)).
+2. Browse and, if needed, visually edit or clean sessions in the viewer.
+3. Open the **🌟 Stars2Cells Pipeline** panel, set parameters, and run **Steps 1 → 3** in order.
+4. Use each step's **inspector** to check coverage, calibration fit, match maps, RANSAC residuals, and final tracks before moving on.
+
+### Option 2 — Headless / scripted (batch and HPC)
+
+Edit the config block at the top of **`s2c_api.py`** — set `INPUT_DIR`, `OUTPUT_DIR`, the `RUN_STEP_*` toggles, and any parameter overrides — then run:
+
+```bash
+python s2c_api.py
+```
+
+It executes the selected steps end to end with the same progress dialogs as the GUI and logs a per-animal summary (C value, R², match rate, track counts) to stdout and to `OUTPUT_DIR/logs/`.
+
+## Input data format
+
+One `.npy` file per imaging session. The filename encodes the animal and session:
+
+```
+^([A-Za-z0-9_]+?)_(\d+)(.*?)\.npy$
+   └ animal_id ┘ └ session ┘└ optional suffix ┘
+```
+
+For example `408021_758519303.npy` → animal `408021`, session `758519303`. Files for the same animal are grouped and ordered automatically.
+
+Each file contains either (preferred) a pickled dict of centroids or a raw footprint matrix:
+
+```python
+import numpy as np
+
+data = {
+    'centroids_x': np.array([123.4, 456.7, 789.0, 234.1]),  # N x-coords (pixels)
+    'centroids_y': np.array([234.5, 567.8, 890.1, 345.2]),  # N y-coords (pixels)
+    'roi_ids':     np.array([0, 1, 2, 3]),                  # optional, unique per session
+}
+np.save('408021_758519303.npy', data, allow_pickle=True)
+```
+
+- **Format 1 (recommended):** dict with `centroids_x`, `centroids_y` (and optional `roi_ids`).
+- **Format 2 (fallback):** a 3D `(H, W, N)` footprint matrix; centroids are extracted automatically.
+- Sessions need **N ≥ 4** neurons; coordinates are in pixels, in a consistent frame across an animal's sessions.
+
+The complete specification, conversion recipes (Suite2p / CaImAn / EXTRACT), and a validation checklist are in **[`base_data_requirements.txt`](base_data_requirements.txt)**.
+
+## Output data
+
+Results land in your output directory, one subfolder per step. The deliverables are in `step_3_results/`:
+
+- **`*_sweep.npz`** — one per session pair: `matched_ref_indices`, `matched_tgt_indices`, `match_confidence` (`[0, 1]`), and `match_pass` (1 = primary, 2 = recovery), plus centroids and metadata.
+- **`{animal_id}_consolidated_tracking.npz`** — global neuron identities across all of an animal's sessions: `neuron_tracks` (`global_id → {session_idx: local_idx}`), `track_lengths`, and `track_confidence` (weakest-link reliability).
+- **`step3_summary.json`** — parameters used and per-animal aggregate stats.
+
+Prefer `match_confidence` / `track_confidence` over raw cost when filtering — costs are not comparable across runs. The full output schema, loading code, and analysis workflows (retention, drift, persistent cells) are in **[`exporting_data.txt`](exporting_data.txt)**.
+
+## Repository structure
+
+```
+Stars2Cells/
+├── stars2cells.py             # PyQt5 GUI entry point (load, visualize, run, inspect)
+├── s2c_api.py                 # Headless runner — edit paths/toggles at top, then run
+├── launch_s2c.bat             # Windows launcher (activates conda env "s2c", auto-restart)
+├── requirements.txt           # pip dependencies (numeric core installed via conda)
+├── base_data_requirements.txt # Input .npy format specification
+├── exporting_data.txt         # Step 3 output schema + analysis recipes
+├── S2C_logo.png
+├── steps/                     # The pipeline engine, one module per step
+│   ├── step_1_quad_generation.py
+│   ├── step_1_5_threshold_generation.py
+│   ├── step_2_matching_generator.py
+│   ├── step_2_5_RANSAC.py
+│   ├── step_3_neuron_matching.py
+│   └── step_1_Q_Saturation_Add_On.py   # quad-count saturation estimation
+├── utilities/                 # Shared infrastructure
+│   ├── step_info.py           # Single source of truth for parameters & step metadata
+│   ├── config.py              # PipelineConfig
+│   ├── gui_components.py       # Reusable Qt widgets / theming
+│   ├── threshold_generator.py
+│   └── shared_*_utils.py       # io, logging, parallelism, paths, stats, viewers
+├── viewers/                   # Per-step PyQt inspectors (Steps 1, 1.5, 2, 2.5, 3)
+└── Sample_Data_Generation/    # Notebooks to synthesize sample data with ground truth
+```
+
+> `CellReg_Comparison/` contains auxiliary benchmarking against the MATLAB CellReg tool and is **not part of the core pipeline** — you can ignore it for normal use.
+
+---
+
+## Parameter Tuning Guide
+
+Stars2Cells exposes many parameters by design. The rest of this README is a deep reference for every one — what it does, its default, and the specific symptom that should make you reach for it. The defaults are tuned for 150–400-neuron recordings, so if you just want sensible results on typical data, run with them first and come back here when something looks off.
 
 ## Philosophy: Why Are There So Many Knobs?
 
@@ -18,18 +219,6 @@ Each parameter includes:
 - **When to touch it** — the specific symptom that tells you this knob needs turning
 
 Parameters are organized by pipeline step. If you're debugging Step 3 results, start at Step 1. Bad inputs propagate forward and no amount of Step 3 tuning fixes bad quads.
-
----
-
-## Table of Contents
-
-1. [Step 1: Quad Generation](#step-1-quad-generation)
-2. [Step 1.5: Threshold Calibration](#step-15-threshold-calibration)
-3. [Step 2: Quad Matching](#step-2-quad-matching)
-4. [Step 2.5: RANSAC Geometric Filtering](#step-25-ransac-geometric-filtering)
-5. [Step 3: Neuron Matching](#step-3-neuron-matching)
-6. [General Parameters](#general-parameters)
-7. [Quick Diagnostic Checklist](#quick-diagnostic-checklist)
 
 ---
 
@@ -568,3 +757,22 @@ When your results don't look right, work through these in order:
 Every parameter in this pipeline is saved in the output files. The Step 1 NPZ includes `generation_method: "diagonal_first"`. Step 1.5 saves the full threshold sweep. Step 3 saves its parameters in `step3_summary.json` and persists per-match diagnostics (`match_confidence`, `match_pass`, `matched_costs`) in each `*_sweep.npz` plus per-track confidence (`track_confidence`, `track_mean_confidence`) in `{animal_id}_consolidated_tracking.npz` — so even if you forget which run produced which file, you can compare both the inputs (parameters) and the outputs (confidence distributions) directly. If you can't reproduce a result, compare the saved parameters between runs first, then look at the confidence histograms.
 
 The pipeline is deterministic given identical inputs and parameters, with one exception: `diagonal_rng_seed` controls the random long-range diagonals in Step 1.
+
+---
+
+## Sample data
+
+The `Sample_Data_Generation/` notebooks synthesize benchmark sessions with known ground-truth neuron identities, so you can validate the pipeline end to end and quantify matching accuracy:
+
+- `sample_data_creation.ipynb` — generate synthetic multi-session centroid sets in the expected `.npy` format.
+- `Ground_Truth_Mapping.ipynb` — build the ground-truth cross-session mapping to score Stars2Cells output against.
+
+This is the recommended way to sanity-check an installation: run the notebooks, point the pipeline at the generated folder, and confirm the consolidated tracks recover the known identities.
+
+## Citation and acknowledgments
+
+Stars2Cells is developed by the Neumaier Lab. If you use it in your research, please cite the accompanying paper (in preparation) — citation details will be added here on release.
+
+<!-- TODO: add BibTeX / DOI once the paper is published. -->
+
+No license file is currently included; add one (for example MIT) before any public release.
