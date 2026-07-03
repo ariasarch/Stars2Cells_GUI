@@ -1,0 +1,144 @@
+name: Build distributables
+
+# Builds the standalone Windows exe (zipped) and macOS app (zip + dmg)
+# so end users never touch conda/pip.
+#
+# Triggers:
+#   - Push a tag like v1.0.0  -> builds AND attaches everything to a
+#     GitHub Release for that tag.
+#   - Manual run (Actions tab -> "Build distributables" -> Run workflow)
+#     -> builds and uploads artifacts you can download from the run page.
+#
+# Release destination:
+#   Public downloads live on the ariasarch/Stars2Cells repo. Publishing
+#   there from this repo's CI requires a personal access token with
+#   "contents: write" on ariasarch/Stars2Cells, saved as the repo secret
+#   RELEASE_TOKEN (Settings -> Secrets and variables -> Actions).
+#   If RELEASE_TOKEN is not set, builds attach to THIS repo's release
+#   instead, and you can re-upload them to Stars2Cells by hand.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version string (e.g. 1.0.0)"
+        required: false
+        default: "1.0.0"
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ github.event.inputs.version || '1.0.0' }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r packaging/requirements-build.txt
+
+      - name: Generate icons
+        run: python packaging/make_icons.py
+
+      - name: Build exe
+        env:
+          S2C_VERSION: ${{ steps.ver.outputs.version }}
+        run: pyinstaller --noconfirm --clean packaging/stars2cells.spec
+
+      - name: Zip app folder
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/Stars2Cells/Stars2Cells.exe")) { throw "exe missing" }
+          Compress-Archive -Path "dist/Stars2Cells" -DestinationPath "Stars2Cells_${{ steps.ver.outputs.version }}_windows_x64.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Stars2Cells_${{ steps.ver.outputs.version }}_windows_x64
+          path: Stars2Cells_*_windows_x64.zip
+
+      - name: Publish to ariasarch/Stars2Cells release
+        if: startsWith(github.ref, 'refs/tags/v') && env.RELEASE_TOKEN != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: ariasarch/Stars2Cells
+          token: ${{ env.RELEASE_TOKEN }}
+          tag_name: ${{ github.ref_name }}
+          files: Stars2Cells_*_windows_x64.zip
+
+      - name: Attach to release on this repo (no RELEASE_TOKEN fallback)
+        if: startsWith(github.ref, 'refs/tags/v') && env.RELEASE_TOKEN == ''
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Stars2Cells_*_windows_x64.zip
+
+  macos:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-latest   # Apple Silicon (arm64)
+          - runner: macos-13       # Intel (x86_64)
+    runs-on: ${{ matrix.runner }}
+    env:
+      RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ github.event.inputs.version || '1.0.0' }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build app, zip, and dmg
+        run: ./packaging/build_macos.sh "${{ steps.ver.outputs.version }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Stars2Cells_${{ steps.ver.outputs.version }}_macos_${{ matrix.runner == 'macos-13' && 'x86_64' || 'arm64' }}
+          path: |
+            Stars2Cells_*_macos_*.zip
+            Stars2Cells_*_macos_*.dmg
+
+      - name: Publish to ariasarch/Stars2Cells release
+        if: startsWith(github.ref, 'refs/tags/v') && env.RELEASE_TOKEN != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: ariasarch/Stars2Cells
+          token: ${{ env.RELEASE_TOKEN }}
+          tag_name: ${{ github.ref_name }}
+          files: |
+            Stars2Cells_*_macos_*.zip
+            Stars2Cells_*_macos_*.dmg
+
+      - name: Attach to release on this repo (no RELEASE_TOKEN fallback)
+        if: startsWith(github.ref, 'refs/tags/v') && env.RELEASE_TOKEN == ''
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Stars2Cells_*_macos_*.zip
+            Stars2Cells_*_macos_*.dmg

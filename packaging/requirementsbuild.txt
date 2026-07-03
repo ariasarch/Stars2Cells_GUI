@@ -1,0 +1,28 @@
+# Pip-only dependency set used for building standalone distributables.
+# Mirrors requirements.txt but replaces the conda-installed numeric core
+# (numpy / scipy / faiss-cpu) with pip wheels so no conda is needed.
+
+numpy==1.26.4
+scipy==1.13.0
+# Optional accelerator for Step 2 matching; pipeline falls back to
+# scikit-learn KDTree if unavailable.
+faiss-cpu>=1.8.0
+
+matplotlib==3.10.8
+PyQt5==5.15.11
+# 5.15.2 has no Apple-Silicon wheels; newer Qt5 runtime releases do.
+PyQt5-Qt5==5.15.2; sys_platform != "darwin"
+PyQt5-Qt5>=5.15.11; sys_platform == "darwin"
+PyQt5_sip==12.18.0
+pyqtgraph==0.14.0
+scikit-image==0.26.0
+scikit-learn==1.8.0
+tqdm==4.67.3
+Pillow==12.1.1
+ImageIO==2.37.3
+tifffile==2026.3.3
+psutil==7.0.0
+networkx==3.6.1
+
+# Build tool
+pyinstaller>=6.11
