@@ -96,7 +96,7 @@ conda install -c conda-forge numpy=1.26.4 scipy=1.13.0 faiss-cpu -y
 pip install -r requirements.txt
 ```
 
-`faiss-cpu` accelerates Step 2 descriptor matching but is optional — the pipeline falls back to a scikit-learn KDTree if FAISS cannot be imported. The remaining dependencies (PyQt5, pyqtgraph, scikit-image, scikit-learn, matplotlib, tqdm, Pillow, imageio, tifffile, psutil, networkx) are pinned in `requirements.txt`.
+`faiss-cpu` accelerates Step 2 descriptor matching but is optional — the pipeline falls back to a SciPy KDTree if FAISS cannot be imported. The remaining dependencies (PyQt5, pyqtgraph, scikit-image, scikit-learn, matplotlib, tqdm, Pillow, imageio, tifffile, psutil, networkx) are pinned in `requirements.txt`.
 
 ## Quick start
 
@@ -454,6 +454,14 @@ How session pairs are generated within each group.
 
 ---
 
+### `max_pairs_per_animal` — Calibration Pair Cap
+
+**Default:** `None` (no cap) in the GUI; `s2c_api.py` sets it explicitly (e.g. `10`).
+
+Caps how many session pairs per animal are used to fit the `τ = C·√N` law. Exposed through the headless runner (`s2c_api.py`, as `MAX_PAIRS_PER_ANIMAL`); it is not a GUI field. When the projected pair count exceeds the cap, groups are randomly subsampled (fixed seed `42`) down to roughly `max_pairs_per_animal // n_groups` pairs each. Use it when `all_vs_all` on a large session set makes calibration prohibitively slow — a few well-chosen pairs are enough to fit a single constant `C`.
+
+---
+
 ## Step 2: Quad Matching
 
 Step 2 takes the quad descriptors from Step 1 and the calibrated threshold from Step 1.5, then finds descriptor-similar quad pairs across sessions. This is where FAISS (if available) earns its keep — brute-force descriptor matching at scale.
@@ -518,7 +526,7 @@ The maximum distance (in pixels, after transformation) between matched neuron ce
 | `5.0` | Standard. Accommodates typical centroid extraction uncertainty (2-3px) plus minor session-to-session drift. | Good balance for most datasets. |
 | `15.0` | Permissive. Matches survive even with 15px of residual error after transform. | Many false inliers. The transform estimate itself becomes unreliable because outliers contaminate the consensus. Only use if your sessions have large non-rigid deformations. |
 
-**The math:** RANSAC samples minimal subsets (3 point pairs for affine), fits a transform, counts inliers within `ransac_max_residual`, and keeps the transform with the most inliers. If the true residual distribution has σ ≈ 2px, setting the threshold to 3σ = 6px captures ~99.7% of true inliers.
+**The math:** RANSAC samples minimal subsets (4 point pairs, rigid transform by default — a similarity transform when `ransac_allow_scaling` is enabled), fits a transform, counts inliers within `ransac_max_residual`, and keeps the transform with the most inliers. If the true residual distribution has σ ≈ 2px, setting the threshold to 3σ = 6px captures ~99.7% of true inliers.
 
 **When to adjust:** Look at the Step 2.5 viewer's residual histogram. If the distribution has a clear peak near 0 with a long tail, set the threshold just past the peak's shoulder. If the distribution is bimodal (two peaks), you may have a non-rigid deformation and need to increase the threshold or reconsider your experimental setup.
 
@@ -579,6 +587,19 @@ If set, rejects any transform with rotation exceeding this angle. Useful when yo
 If set, rejects transforms with translation exceeding this value. Use when you know the FOV position is relatively stable.
 
 Similar logic to rotation constraint. For a 512×512 FOV with chronic window imaging, translations > 100px between sessions would be unusual and likely indicate a spurious transform.
+
+---
+
+### `ransac_allow_scaling` — Rigid vs. Similarity Transform
+
+**Default:** `False` (rigid)
+
+Controls whether RANSAC fits a pure rigid transform (rotation + translation, scale fixed at 1.0) or a similarity transform (rigid + a single uniform scale factor). Exposed through the headless runner (`s2c_api.py`, as `RANSAC_ALLOW_SCALING`); the GUI always runs rigid.
+
+| Setting | Behavior |
+|---------|----------|
+| `False` | Rigid transform. Correct when sessions share the same objective and zoom — the usual case for longitudinal imaging of one animal. |
+| `True` | Similarity transform. Enable only if magnification actually changed between sessions (objective swap, zoom change). The refit rejects transforms whose recovered scale falls outside `[0.8, 1.2]`. |
 
 ---
 
