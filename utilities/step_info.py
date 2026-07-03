@@ -23,11 +23,14 @@ PARAMETER_SCHEMAS = {
     # ========== STEP 1: QUAD GENERATION ==========
     # Filename parsing
     'session_filename_regex': {
-        'default': r'^([A-Za-z0-9_]+?)_(\d+)__.*\.npy$',
+        'default': r'^([A-Za-z0-9_]+?)_(\d+)(.*?)\.npy$',
         'type': str,
         'widget': 'lineedit',
         'description': 'Regex to parse animal_id and session_number from .npy filenames. '
-                       'Must have exactly 2 capture groups: (animal_id, session_number).'
+                       'Groups: (animal_id, session_number, optional_suffix). The first two '
+                       'capture groups are required; the optional suffix (anything between the '
+                       'session number and .npy) is preserved as part of the session name and '
+                       'is available to session_group_regex for FOV grouping.'
     },
     # Diagonal sampling
     'knn_k': {
