@@ -97,12 +97,18 @@ def build_cost_matrix_from_filtered_quads(
     if voted_mask.sum() == 0:
         return vote_cost.astype(np.float32), dist_matrix, vote_matrix, vote_norm
 
-    median_vote_cost = np.median(vote_cost[voted_mask])
-    median_dist = max(np.median(dist_matrix[voted_mask]), 1e-9)
-    dist_weight = median_vote_cost / median_dist
+    # Distance term expressed in units of the RANSAC residual. Using a FIXED
+    # residual-normalized scale (rather than dist_weight = median_vote_cost /
+    # median_dist) is critical: for clean data the strongly-voted true pairs all
+    # share the maximum vote_norm, so their vote_cost -> 0 and median_vote_cost
+    # -> 0, which zeroed dist_weight and dropped distance from the cost entirely.
+    # That produced an all-equal (all-zero) cost matrix and an arbitrary
+    # Hungarian assignment. Keeping distance always-on lets geometry break ties
+    # between equally-voted candidates.
+    dist_term = dist_matrix / max(ransac_max_residual, 1e-9)
 
     combined_cost = np.where(voted_mask,
-                             vote_cost + dist_weight * dist_matrix,
+                             vote_cost + dist_term,
                              np.inf)
 
     if not block_zero_vote_pairs:
@@ -110,12 +116,12 @@ def build_cost_matrix_from_filtered_quads(
         if zero_vote_nearby.any():
             finite_voted = combined_cost[voted_mask]
             vote_penalty = float(np.max(finite_voted)) if len(finite_voted) > 0 else max_vnorm
-            combined_cost[zero_vote_nearby] = vote_penalty + dist_weight * dist_matrix[zero_vote_nearby]
+            combined_cost[zero_vote_nearby] = vote_penalty + dist_term[zero_vote_nearby]
             n_fallback = int(zero_vote_nearby.sum())
             logger.info(f"    Zero-vote fallback: {n_fallback} pairs given distance-only cost")
 
     logger.info(f"    Built cost matrix: {n_ref} x {n_tgt} "
-                f"(dist_weight={dist_weight:.2f}, cutoff={dist_cutoff:.1f}px)")
+                f"(residual-normalized distance, cutoff={dist_cutoff:.1f}px)")
 
     return combined_cost, dist_matrix, vote_matrix, vote_norm
 
@@ -256,6 +262,12 @@ def process_session_pair_sweep(
         return None
 
     global_median_cost = float(np.median(finite_costs))
+    # Guard against a degenerate all-low-cost field (e.g. many equally-voted
+    # true pairs): a zero median would make every dummy / unmatched entry 0 and
+    # turn the padded matrix into all-zeros, giving an arbitrary assignment.
+    if global_median_cost <= 1e-6:
+        pos = finite_costs[finite_costs > 1e-6]
+        global_median_cost = float(np.median(pos)) if pos.size else 1.0
 
     if use_asymmetric_dummy_costs:
         ref_min_dist = dist_matrix.min(axis=1)

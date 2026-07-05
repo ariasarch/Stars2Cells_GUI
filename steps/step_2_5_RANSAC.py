@@ -785,6 +785,7 @@ def run_step_2_5_ransac(
 
     if processes:
         n_workers = processes
+        max_by_ram = max_by_cpu = processes
     else:
         per_worker_gb = pair_ram_delta * 3.0
         max_by_ram = max(1, int(avail_gb * 0.8 / per_worker_gb))

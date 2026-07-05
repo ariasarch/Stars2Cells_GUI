@@ -1015,6 +1015,24 @@ def run_global_tuning_all_animals(
     ctx = multiprocessing.get_context('spawn')
     log_queue = ctx.Queue()
 
+    # Messages read from the queue during the launch/throttle phase are buffered
+    # here so the collection loop below can process them exactly as if they had
+    # just arrived. Draining while we throttle is REQUIRED, not an optimization:
+    # a worker's Queue.put() only hands data to a feeder thread and returns, and
+    # the worker cannot terminate until that thread flushes everything to the
+    # pipe. If the parent throttles (while active_count >= max_workers) without
+    # reading, the pipe fills, the feeder blocks, the worker never exits,
+    # is_alive() stays True, and the throttle -- hence the whole step --
+    # deadlocks. This bites whenever animals-per-run > max_workers.
+    _prebuffer = []
+
+    def _drain_now():
+        while True:
+            try:
+                _prebuffer.append(log_queue.get_nowait())
+            except queue_module.Empty:
+                break
+
     def _n_sessions(a):
         return len(all_sessions_by_animal.get(a[0], []))
     args_sorted = sorted(args_list, key=_n_sessions)
@@ -1028,7 +1046,8 @@ def run_global_tuning_all_animals(
         is_verbose = (idx == 0)
 
         while active_count >= max_workers:
-            _time.sleep(0.5)
+            _drain_now()          # keep the pipe empty so finished workers can exit
+            _time.sleep(0.25)
             active_count = sum(1 for _, p in processes_list if p.is_alive())
 
         p = ctx.Process(
@@ -1059,7 +1078,10 @@ def run_global_tuning_all_animals(
         print(f"[MAIN] Top of loop: n_done={n_done}/{n_total}  results_map keys={sorted(results_map.keys())}", file=sys.stderr, flush=True)
         try:
             print(f"[MAIN] Calling log_queue.get(timeout=5.0)...", file=sys.stderr, flush=True)
-            msg_type, aid, payload = log_queue.get(timeout=5.0)
+            if _prebuffer:                       # messages drained during launch/throttle
+                msg_type, aid, payload = _prebuffer.pop(0)
+            else:
+                msg_type, aid, payload = log_queue.get(timeout=5.0)
             print(f"[MAIN] Got message: type={msg_type}  aid={aid}", file=sys.stderr, flush=True)
 
             if msg_type == 'log':
