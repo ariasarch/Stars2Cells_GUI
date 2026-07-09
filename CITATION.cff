@@ -1,0 +1,61 @@
+cff-version: 1.2.0
+message: "If you use Stars2Cells, please cite the preprint below."
+title: "Stars2Cells"
+abstract: "A GUI-driven pipeline that tracks the same neurons across chronic calcium-imaging sessions using astrometric quad descriptors on centroid coordinates."
+type: software
+authors:
+  - family-names: "Peden-Asarch"
+    given-names: "Ari Mendel"
+  - family-names: "Honan"
+    given-names: "Lauren E."
+  - family-names: "Bai"
+    given-names: "Jacqueline Z."
+  - family-names: "Asarch"
+    given-names: "Eli M."
+  - family-names: "Quinn"
+    given-names: "Josiah A."
+  - family-names: "Coffey"
+    given-names: "Kevin R."
+  - family-names: "Neumaier"
+    given-names: "John F."
+    orcid: "https://orcid.org/0000-0002-1763-7118"
+repository-code: "https://github.com/ariasarch/Stars2Cells_GUI"
+url: "https://ariasarch.github.io/Stars2Cells/"
+version: "1.0.0"
+date-released: "2026-07-08"
+license: GPL-3.0-or-later
+identifiers:
+  - type: doi
+    value: "10.64898/2026.07.03.736144"
+    description: "Preprint describing Stars2Cells"
+keywords:
+  - calcium imaging
+  - neuron tracking
+  - cross-session registration
+  - miniscope
+  - plate-solving
+preferred-citation:
+  type: article
+  title: "Stars2Cells: Astrometric Tracking of Neurons Across Imaging Sessions"
+  authors:
+    - family-names: "Peden-Asarch"
+      given-names: "Ari Mendel"
+    - family-names: "Honan"
+      given-names: "Lauren E."
+    - family-names: "Bai"
+      given-names: "Jacqueline Z."
+    - family-names: "Asarch"
+      given-names: "Eli M."
+    - family-names: "Quinn"
+      given-names: "Josiah A."
+    - family-names: "Coffey"
+      given-names: "Kevin R."
+    - family-names: "Neumaier"
+      given-names: "John F."
+      orcid: "https://orcid.org/0000-0002-1763-7118"
+  journal: "bioRxiv"
+  year: 2026
+  month: 7
+  date-published: "2026-07-08"
+  doi: "10.64898/2026.07.03.736144"
+  url: "https://doi.org/10.64898/2026.07.03.736144"
