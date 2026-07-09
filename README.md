@@ -792,8 +792,10 @@ This is the recommended way to sanity-check an installation: run the notebooks, 
 
 ## Citation and acknowledgments
 
-Stars2Cells is developed by the Neumaier Lab. If you use it in your research, please cite the accompanying paper (in preparation) — citation details will be added here on release.
+Stars2Cells is developed by the Neumaier Lab. If you use it in your research, please cite:
 
-<!-- TODO: add BibTeX / DOI once the paper is published. -->
+> Peden-Asarch AM, Honan LE, Bai JZ, Asarch EM, Quinn JA, Coffey KR, Neumaier JF.
+> *Stars2Cells: Astrometric Tracking of Neurons Across Imaging Sessions.*
+> bioRxiv (2026). https://doi.org/10.64898/2026.07.03.736144
 
-No license file is currently included; add one (for example MIT) before any public release.
+You can also click **"Cite this repository"** in the sidebar of the GitHub page for APA/BibTeX formats.
